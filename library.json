@@ -1,0 +1,47 @@
+{
+  "name": "NivaloDevice",
+  "version": "0.1.0",
+  "description": "ESP32 device and bridge library for Nivalo IoT.",
+  "keywords": [
+    "nivalo",
+    "esp32",
+    "iot",
+    "mqtt",
+    "stm32",
+    "ota"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cwbrandsdal/nivalo-esp32.git"
+  },
+  "authors": [
+    {
+      "name": "Nivalo"
+    }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "dependencies": [
+    {
+      "owner": "knolleary",
+      "name": "PubSubClient",
+      "version": "^2.8"
+    },
+    {
+      "owner": "bblanchon",
+      "name": "ArduinoJson",
+      "version": "^6.18.0"
+    },
+    {
+      "owner": "adafruit",
+      "name": "Adafruit NeoPixel",
+      "version": "^1.10.0"
+    },
+    {
+      "owner": "adafruit",
+      "name": "Adafruit DAP library",
+      "version": "^1.8.0"
+    }
+  ]
+}

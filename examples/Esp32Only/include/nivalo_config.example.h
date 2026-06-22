@@ -1,0 +1,15 @@
+#pragma once
+
+#define NIVALO_WIFI_SSID "your-wifi-ssid"
+#define NIVALO_WIFI_PASSWORD "your-wifi-password"
+
+#define NIVALO_IOT_MQTT_HOST "mqtt.nivalo.io"
+#define NIVALO_IOT_MQTT_PORT 1883
+
+#define NIVALO_IOT_DEVICE_ID "00000000-0000-0000-0000-000000000000"
+#define NIVALO_IOT_MQTT_CLIENT_ID "device-00000000000000000000000000000000"
+#define NIVALO_IOT_MQTT_USERNAME "device-00000000000000000000000000000000"
+#define NIVALO_IOT_MQTT_PASSWORD "paste-rotated-mqtt-password-here"
+
+#define NIVALO_IOT_FIRMWARE_VERSION "0.1.0"
+#define NIVALO_IOT_HARDWARE_NAME "esp32-standalone"
