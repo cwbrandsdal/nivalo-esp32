@@ -56,6 +56,10 @@ public:
 
     size_t publish(const char *eventName, const char *eventData);
     size_t publishTelemetry(const char *name, const char *value, const char *unit = NULL);
+    size_t publishRuntimeTelemetry();
+    size_t publishUptimeTelemetry();
+    size_t publishWifiSignalTelemetry();
+    size_t publishHeapTelemetry();
     size_t publishEvent(const char *name, const char *data, const char *severity = "info");
     size_t publishAvailability(const char *status, const char *reason = NULL);
 

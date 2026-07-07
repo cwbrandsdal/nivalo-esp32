@@ -6,15 +6,28 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <HTTPClient.h>
+#if NIVALO_HAS_SECONDARY_MCU
 #include <Adafruit_DAP.h>
+#endif
 #include <Update.h>
 #include "bootloader.h"
-#include <Adafruit_NeoPixel.h>
 #include <SPIFFS.h>
 #include <esp_system.h>
 #include <mbedtls/sha256.h>
 #include <stdlib.h>
 #include <time.h>
+
+#ifndef NIVALO_STATUS_NEOPIXEL_ENABLED
+#define NIVALO_STATUS_NEOPIXEL_ENABLED 1
+#endif
+
+#ifndef NIVALO_STATUS_NEOPIXEL_PIN
+#define NIVALO_STATUS_NEOPIXEL_PIN 27
+#endif
+
+#if NIVALO_STATUS_NEOPIXEL_ENABLED
+#include <Adafruit_NeoPixel.h>
+#endif
 
 WiFiClient EspClient;
 PubSubClient MqttClient(EspClient);
@@ -36,11 +49,11 @@ const char *root_ca =
     "-----END CERTIFICATE-----\n";
 
 #define BUFSIZE (16 * 1024)
-// buffer should be word algined for STM32
 uint8_t buf[BUFSIZE] __attribute__((aligned(4)));
 
 static unsigned char bufFile[BUFSIZE];
 
+#if NIVALO_HAS_SECONDARY_MCU
 unsigned long t = 0;  // timer
 uint32_t addr = 0;    // current addr
 uint32_t bufferd = 0; // currently bufferd
@@ -54,6 +67,7 @@ Adafruit_DAP_STM32 dap;
 #define SWDIO 12
 #define SWCLK 14
 #define SWRST 4
+#endif
 
 static constexpr size_t MQTT_PACKET_BUFFER_SIZE = 4096;
 static constexpr size_t STM32_UART_RX_BUFFER_SIZE = 2048;
@@ -143,9 +157,11 @@ static void copyText(char *destination, size_t destinationSize, const char *sour
 
 static void releaseDapPins()
 {
+#if NIVALO_HAS_SECONDARY_MCU
     pinMode(SWDIO, INPUT);
     pinMode(SWCLK, INPUT);
     pinMode(SWRST, INPUT);
+#endif
 }
 
 static void bytesToHex(const uint8_t *bytes, size_t length, char *output, size_t outputLength)
@@ -234,17 +250,19 @@ static bool queueEventReport(const char *name, const char *data, const char *sev
     return false;
 }
 
-static const uint8_t PIN_NEOPIXEL = 27;
+#if NIVALO_STATUS_NEOPIXEL_ENABLED
+static const uint8_t PIN_NEOPIXEL = NIVALO_STATUS_NEOPIXEL_PIN;
 uint8_t neoPixelBrightness = 10;
 uint8_t neoPixelMaxBrightness = 15;
 volatile uint8_t neoPixelLoopCount = 0;
 static const uint8_t neoPixelLoopCountSteps = 30;
 bool isNeoPixelUpwords = true;
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
+#endif
 
 long lastHeartbeat = 0;
 
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
-
+#if NIVALO_HAS_SECONDARY_MCU
 // dumping stm32 memory for verification
 void print_memory(uint32_t addr, uint8_t *buffer, uint32_t bufsize)
 {
@@ -273,9 +291,58 @@ void print_memory(uint32_t addr, uint8_t *buffer, uint32_t bufsize)
     }
     Serial.println();
 }
+#endif
 
 // Input a value 0 to 255 to get a color value.
 // The colours are a transition r - g - b - back to r.
+#if NIVALO_STATUS_NEOPIXEL_ENABLED
+static void beginStatusPixel()
+{
+    strip.begin();
+    strip.setBrightness(neoPixelBrightness);
+    strip.setPixelColor(0, strip.Color(0, 0, 255));
+    strip.show();
+}
+
+static void setStatusPixel(uint8_t red, uint8_t green, uint8_t blue)
+{
+    strip.setBrightness(neoPixelBrightness);
+    strip.setPixelColor(0, strip.Color(red, green, blue));
+    strip.show();
+}
+
+static void pulseStatusPixel()
+{
+    if (neoPixelLoopCount == neoPixelLoopCountSteps)
+    {
+        if (neoPixelBrightness < neoPixelMaxBrightness && isNeoPixelUpwords)
+        {
+            neoPixelBrightness++;
+        }
+        else if (neoPixelBrightness == neoPixelMaxBrightness)
+        {
+            neoPixelBrightness--;
+            isNeoPixelUpwords = false;
+        }
+        else if (neoPixelBrightness > 1 && !isNeoPixelUpwords)
+        {
+            neoPixelBrightness--;
+        }
+        else if (neoPixelBrightness == 1)
+        {
+            neoPixelBrightness++;
+            isNeoPixelUpwords = true;
+        }
+
+        setStatusPixel(52, 204, 235);
+        neoPixelLoopCount = 0;
+    }
+    else
+    {
+        neoPixelLoopCount++;
+    }
+}
+
 uint32_t Wheel(byte WheelPos)
 {
     WheelPos = 255 - WheelPos;
@@ -291,6 +358,22 @@ uint32_t Wheel(byte WheelPos)
     WheelPos -= 170;
     return strip.Color(WheelPos * 3, 255 - WheelPos * 3, 0);
 }
+#else
+static void beginStatusPixel()
+{
+}
+
+static void setStatusPixel(uint8_t red, uint8_t green, uint8_t blue)
+{
+    (void)red;
+    (void)green;
+    (void)blue;
+}
+
+static void pulseStatusPixel()
+{
+}
+#endif
 
 void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
 {
@@ -346,6 +429,7 @@ void deleteFile(fs::FS &fs, const char *path)
 
 void rainbowCycle(uint8_t wait)
 {
+#if NIVALO_STATUS_NEOPIXEL_ENABLED
     uint16_t i, j;
 
     for (j = 0; j < 256 * 5; j++)
@@ -357,6 +441,9 @@ void rainbowCycle(uint8_t wait)
         strip.show();
         delay(wait);
     }
+#else
+    (void)wait;
+#endif
 }
 
 NivaloDevice::NivaloDevice()
@@ -366,6 +453,7 @@ NivaloDevice::NivaloDevice()
     _mqttPort = 1883;
 }
 
+#if NIVALO_HAS_SECONDARY_MCU
 void programDap(int c)
 {
     dap.programBlock(addr, buf, c);
@@ -375,6 +463,7 @@ void programDap(int c)
     memset(buf, BUFSIZE, c);
     bufferd = 0;
 }
+#endif
 
 // Function called when there's an SWD error
 void error(const char *text)
@@ -394,10 +483,7 @@ boolean NivaloDevice::begin(HardwareSerial &hardSerial, unsigned long baud)
 
 boolean NivaloDevice::begin(unsigned long baud)
 {
-    strip.begin();
-    strip.setBrightness(neoPixelBrightness);
-    strip.setPixelColor(0, strip.Color(0, 0, 255));
-    strip.show();
+    beginStatusPixel();
 
     releaseDapPins();
     _baud = baud;
@@ -420,9 +506,7 @@ boolean NivaloDevice::beginMqtt(
     const char *hardwareName,
     String macAddress)
 {
-    strip.setBrightness(neoPixelBrightness);
-    strip.setPixelColor(0, strip.Color(255, 0, 0));
-    strip.show();
+    setStatusPixel(255, 0, 0);
 
     _macAddr = macAddress;
     _deviceId = deviceId;
@@ -452,24 +536,23 @@ boolean NivaloDevice::beginMqtt(
 
 void NivaloDevice::setColor(NivaloStatusColor color)
 {
-    strip.setBrightness(neoPixelBrightness);
     switch (color)
     {
     case NIVALO_STATUS_RED:
-        strip.setPixelColor(0, strip.Color(255, 0, 0));
+        setStatusPixel(255, 0, 0);
         break;
     case NIVALO_STATUS_GREEN:
-        strip.setPixelColor(0, strip.Color(0, 255, 0));
+        setStatusPixel(0, 255, 0);
         break;
     case NIVALO_STATUS_YELLOW:
-        strip.setPixelColor(0, strip.Color(255, 255, 0));
+        setStatusPixel(255, 255, 0);
         break;
     case NIVALO_STATUS_PULSE_BLUE:
-        strip.setPixelColor(0, strip.Color(52, 204, 235));
+        setStatusPixel(52, 204, 235);
+        break;
     default:
         break;
     }
-    strip.show();
 }
 
 void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
@@ -575,6 +658,18 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
             }
             return;
         }
+
+#if !NIVALO_HAS_SECONDARY_MCU
+        if (targetIsStm32)
+        {
+            queueEventReport("esp32.flash.rejected", "secondary MCU support is disabled", "warning");
+            if (commandId.length() > 0)
+            {
+                queueCommandAckReport(commandId.c_str(), "failed", "Secondary MCU flashing is not enabled for this build");
+            }
+            return;
+        }
+#endif
 
         size_t expectedSizeBytes = arguments["sizeBytes"] | 0U;
         const char *expectedSha256 = arguments["sha256"] | "";
@@ -810,8 +905,10 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
                             NivaloLink.setPaused(false);
                             releaseDapPins();
                             ESP.restart();
+                            return;
                         }
 
+#if NIVALO_HAS_SECONDARY_MCU
                         releaseDapPins();
                         dap.begin(SWCLK, SWDIO, SWRST, &error);
                         Serial.println("Connecting to DAP...");
@@ -1013,6 +1110,7 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
                         dap.deselect();
                         dap.dap_disconnect();
                         releaseDapPins();
+#endif
                     }
                     listDir(SPIFFS, "/", 0);
                     deleteFile(SPIFFS, "/firmware.bin");
@@ -1023,7 +1121,9 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
                     Serial.println("failed to mount FS");
                 }
 
+#ifdef LED_BUILTIN
                 digitalWrite(LED_BUILTIN, LOW);
+#endif
 
                 mqttReconnect();
 
@@ -1126,8 +1226,7 @@ void NivaloDevice::mqttReconnect()
         if (MqttClient.connect(_clientId.c_str(), _username.c_str(), _password.c_str()))
         {
             Serial.println("connected");
-            strip.setPixelColor(0, strip.Color(52, 204, 235));
-            strip.show();
+            setStatusPixel(52, 204, 235);
             // digitalWrite(BUILTIN_LED, HIGH);
             // Subscribe
             delay(1000);
@@ -1193,6 +1292,49 @@ size_t NivaloDevice::publishTelemetry(const char *name, const char *value, const
     MqttClient.publish(_telemetryTopic, output.c_str());
 
     return (size_t)1;
+}
+
+size_t NivaloDevice::publishRuntimeTelemetry()
+{
+    size_t published = 0;
+    published += publishUptimeTelemetry();
+    published += publishWifiSignalTelemetry();
+    published += publishHeapTelemetry();
+    return published;
+}
+
+size_t NivaloDevice::publishUptimeTelemetry()
+{
+    String uptime = String(millis());
+    return publishTelemetry("uptime_ms", uptime.c_str(), "ms");
+}
+
+size_t NivaloDevice::publishWifiSignalTelemetry()
+{
+    if (WiFi.status() != WL_CONNECTED)
+    {
+        return 0;
+    }
+
+    String rssi = String(WiFi.RSSI());
+    return publishTelemetry("wifi_rssi", rssi.c_str(), "dBm");
+}
+
+size_t NivaloDevice::publishHeapTelemetry()
+{
+    uint32_t heapTotal = ESP.getHeapSize();
+    uint32_t heapFree = ESP.getFreeHeap();
+    uint32_t heapUsed = heapTotal > heapFree ? heapTotal - heapFree : 0;
+
+    String heapUsedText = String(heapUsed);
+    String heapFreeText = String(heapFree);
+    String heapTotalText = String(heapTotal);
+
+    size_t published = 0;
+    published += publishTelemetry("heap_used", heapUsedText.c_str(), "B");
+    published += publishTelemetry("heap_free", heapFreeText.c_str(), "B");
+    published += publishTelemetry("heap_total", heapTotalText.c_str(), "B");
+    return published;
 }
 
 size_t NivaloDevice::publishEvent(const char *name, const char *data, const char *severity)
@@ -1560,44 +1702,13 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
 
 void NivaloDevice::loop()
 {
-    if (neoPixelLoopCount == neoPixelLoopCountSteps)
-    {
-        if (neoPixelBrightness < neoPixelMaxBrightness && isNeoPixelUpwords)
-        {
-            neoPixelBrightness++;
-        }
-        else if (neoPixelBrightness == neoPixelMaxBrightness)
-        {
-            neoPixelBrightness--;
-            isNeoPixelUpwords = false;
-        }
-        else if (neoPixelBrightness > 1 && !isNeoPixelUpwords)
-        {
-            neoPixelBrightness--;
-        }
-        else if (neoPixelBrightness == 1)
-        {
-            neoPixelBrightness++;
-            isNeoPixelUpwords = true;
-        }
-
-        strip.setPixelColor(0, strip.Color(52, 204, 235));
-        strip.setBrightness(neoPixelBrightness);
-        strip.show();
-
-        neoPixelLoopCount = 0;
-    }
-    else
-    {
-        neoPixelLoopCount++;
-    }
+    pulseStatusPixel();
 
     MqttClient.loop();
 
     if (!MqttClient.connected())
     {
-        strip.setPixelColor(0, strip.Color(255, 0, 0));
-        strip.show();
+        setStatusPixel(255, 0, 0);
         // digitalWrite(BUILTIN_LED, LOW);
         mqttReconnect();
     }
@@ -1612,8 +1723,7 @@ void NivaloDevice::loop()
         lastHeartbeat = millis();
 
         publishAvailability("online", "heartbeat");
-        String uptime = String(millis());
-        publishTelemetry("uptimeMs", uptime.c_str(), "ms");
+        publishRuntimeTelemetry();
     }
 
     while (hwAvailable() > 0)

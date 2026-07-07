@@ -42,3 +42,15 @@ Copy-Item .\include\nivalo_config.example.h .\include\nivalo_config.h
 ```
 
 `include/nivalo_config.h` is ignored by git because it contains device credentials.
+
+## Runtime Telemetry
+
+Call `device.publishRuntimeTelemetry()` from the sketch loop to publish the portal's standard runtime vitals:
+
+- `uptime_ms`
+- `wifi_rssi`
+- `heap_used`
+- `heap_free`
+- `heap_total`
+
+Sketches should prefer this helper over hand-written telemetry names for common ESP32 health metrics.

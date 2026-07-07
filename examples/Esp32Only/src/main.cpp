@@ -55,7 +55,6 @@ void loop()
     if (millis() - lastTelemetryAt > 30000UL)
     {
         lastTelemetryAt = millis();
-        String uptime = String(millis());
-        device.publishTelemetry("uptimeMs", uptime.c_str(), "ms");
+        device.publishRuntimeTelemetry();
     }
 }
