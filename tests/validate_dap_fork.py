@@ -33,7 +33,7 @@ def main() -> None:
     assert provenance["commit"] == "8ca356d92e73d0d1005534030849e7ca37324805"
     assert provenance["licenseFile"] == "license.txt"
     assert set(provenance["modifiedFiles"]) == {"Adafruit_DAP_STM32.cpp", "library.properties"}
-    assert {path.name for path in SOURCE.iterdir() if path.is_file()} == set(provenance["filesSha256"])
+    assert {path.name for path in SOURCE.iterdir() if path.is_file()} == set(provenance["filesSha256"]) | {"library.json"}
 
     for name, expected in provenance["filesSha256"].items():
         if name not in provenance["modifiedFiles"]:
@@ -64,6 +64,10 @@ def main() -> None:
     assert manifest["sourceStatus"] == "vendored-active"
     assert manifest["publicationStatus"] == "not-published"
     assert manifest["plannedPackage"]["version"] == "1.8.3-nivalo.1"
+    package = json.loads((SOURCE / "library.json").read_text(encoding="utf-8"))
+    assert package["name"] == manifest["plannedPackage"]["platformioName"]
+    assert package["version"] == manifest["plannedPackage"]["version"]
+    assert package["license"] == manifest["license"]
 
     internal = (ROOT / "examples/Esp32Stm32Bridge/platformio.ini").read_text(encoding="utf-8")
     assert manifest["localReplacementPaths"]["libraryExample"] in internal

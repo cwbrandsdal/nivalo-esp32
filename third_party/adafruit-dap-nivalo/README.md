@@ -23,3 +23,7 @@ reapply or retire the delta, and pass drift validation plus both bridge builds.
 Bridge `platformio.ini` files repeat the exact DAP-chain versions, including
 TinyUSB's MIDI dependency. `SD` is supplied locally by the pinned Espressif32
 platform rather than resolved as a floating registry package.
+
+`source/library.json` is the prepared PlatformIO manifest. Publication remains
+guarded by `docs/registry-release.md`; this directory layout is not itself an
+Arduino Library Manager submission.

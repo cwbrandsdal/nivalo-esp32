@@ -50,6 +50,8 @@ jobs:
         run: python tests/validate_architecture.py
       - name: Validate maintained Adafruit DAP fork
         run: python tests/validate_dap_fork.py
+      - name: Validate registry release readiness
+        run: python tests/validate_registry_release.py
       - name: Validate runtime provisioning
         run: python tests/validate_provisioning.py
       - name: Install PlatformIO

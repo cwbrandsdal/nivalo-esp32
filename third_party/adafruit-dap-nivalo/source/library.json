@@ -1,0 +1,49 @@
+{
+  "name": "Nivalo Adafruit DAP",
+  "version": "1.8.3-nivalo.1",
+  "description": "Maintained Nivalo fork of Adafruit DAP for verified ARM Cortex programming.",
+  "keywords": [
+    "dap",
+    "swd",
+    "stm32",
+    "programmer"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cwbrandsdal/nivalo-esp32.git"
+  },
+  "authors": [
+    {
+      "name": "Adafruit"
+    },
+    {
+      "name": "Nivalo firmware maintainers",
+      "maintainer": true
+    }
+  ],
+  "license": "BSD-3-Clause",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "dependencies": [
+    {
+      "owner": "adafruit",
+      "name": "Adafruit SPIFlash",
+      "version": "5.1.1"
+    },
+    {
+      "owner": "adafruit",
+      "name": "SdFat - Adafruit Fork",
+      "version": "2.3.103"
+    },
+    {
+      "owner": "adafruit",
+      "name": "Adafruit TinyUSB Library",
+      "version": "3.7.7"
+    },
+    {
+      "owner": "fortyseveneffects",
+      "name": "MIDI Library",
+      "version": "5.0.2"
+    }
+  ]
+}

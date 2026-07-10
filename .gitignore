@@ -6,3 +6,4 @@
 examples/**/include/nivalo_config.h
 build/
 dist/
+.release-stage/

@@ -13,7 +13,9 @@
   "plannedPackage": {
     "platformioName": "Nivalo Adafruit DAP",
     "arduinoName": "Nivalo_Adafruit_DAP",
-    "version": "1.8.3-nivalo.1"
+    "version": "1.8.3-nivalo.1",
+    "platformioManifest": "source/library.json",
+    "releaseTag": "dap-v1.8.3-nivalo.1"
   },
   "localReplacementPaths": {
     "libraryExample": "symlink://../../third_party/adafruit-dap-nivalo/source",

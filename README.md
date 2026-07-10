@@ -200,7 +200,9 @@ dependency resolution.
 
 `library.json` (PlatformIO) and `library.properties` (Arduino Library Manager)
 describe release 0.2.0 and its dependencies. They are ready for a later reviewed
-publication workflow; this repository change does not publish externally.
+publication workflow; this repository change does not publish externally. See
+`docs/registry-release.md` for immutable tag rules, dry-run packaging, named
+Actions credentials, Arduino readiness gates, and rollback/deprecation steps.
 
 ## Runtime Telemetry
 
