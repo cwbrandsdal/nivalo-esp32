@@ -10,6 +10,27 @@ Never paste Wi-Fi, MQTT, claim, signing-private-key, or token values into the
 evidence record. Record stable identifiers, timestamps, hashes, and sanitized
 outcomes instead.
 
+Select exactly one approved environment before building the tester. Do not mix
+an API, console, device identity, broker, CA, or firmware-signing key across
+environments.
+
+| Environment | MQTT hostname | TLS port |
+|---|---|---|
+| Production | `mqtt.nivalo.io` | `8883` |
+| Isolated staging | `mqtt-staging.nivalo.io` | `8884` |
+
+The table records the repository-approved endpoints, not proof that either is
+live. Before an attended drill, independently verify DNS/network publication
+and the certificate presented by the selected endpoint. The leaf certificate
+must cover the exact hostname. Record the leaf SAN, issuer/intermediate chain,
+root subject and SHA-256 fingerprint, and expiry without recording any private
+key material. The firmware default trust store accepts Let's Encrypt ISRG Root
+X1/X2. If the selected endpoint uses another approved public root, configure
+that root explicitly through `NIVALO_DEV_MQTT_CA_CERTIFICATE` (pre-provisioned
+tester) or the claim response's `mqtt.caCertificatePem` (runtime provisioning),
+and record the CA source. Never use `setInsecure` or pin a short-lived leaf as
+the long-lived trust anchor.
+
 ## Preconditions
 
 - [ ] Record the tester project and `nivalo-esp32` commit/worktree identity.
@@ -17,7 +38,13 @@ outcomes instead.
 - [ ] Confirm the intended board is physically on `COM6`; do not guess from a
       previously cached port.
 - [ ] Confirm the monitor will use `115200` baud.
-- [ ] Confirm MQTT is explicitly TLS on port `8883`; public `1883` is not used.
+- [ ] Record the selected environment and confirm the API, console, device
+      identity, broker, and firmware-signing public key all belong to it.
+- [ ] Confirm MQTT is explicitly TLS on the selected approved port (`8883` for
+      production or `8884` for isolated staging); plaintext `1883`/`1884` is
+      not used by the device.
+- [ ] Confirm the configured hostname exactly matches the certificate SAN and
+      record the verified CA chain/root fingerprint and CA source.
 - [ ] Confirm the test device belongs to the intended organization and no
       production customer device shares its identity.
 - [ ] Confirm rollback firmware/configuration and the operator responsible for
@@ -29,7 +56,8 @@ outcomes instead.
 
 - [ ] Flash only after separate approval, then open `COM6` at `115200`.
 - [ ] Confirm time synchronization completes before MQTT connection.
-- [ ] Confirm TLS/8883 connects using the expected hostname and trusted CA.
+- [ ] Confirm TLS connects on the selected approved port using the exact
+      environment hostname and recorded trusted CA chain.
 - [ ] Confirm the console reports the device online and receives one telemetry
       sample. Record timestamps and the device identifier, not credentials.
 
@@ -45,7 +73,8 @@ outcomes instead.
 - [ ] Build a one-test variant whose configured hostname does not match the
       broker certificate while retaining certificate validation.
 - [ ] Confirm hostname validation fails and no MQTT session is established.
-- [ ] Restore the approved hostname and prove TLS/8883 reconnects successfully.
+- [ ] Restore the selected approved hostname/port/CA and prove TLS reconnects
+      successfully.
 
 ## Provisioning persistence and exact retry
 
@@ -90,11 +119,17 @@ tester sketch intentionally exercises pre-existing credentials.
 |---|---|
 | Drill date/time (UTC) | |
 | Operators / approver | |
+| Environment (`production` or `isolated staging`) | |
 | Device ID / hardware revision | |
 | Tester and library revision | |
 | Firmware SHA-256 | |
 | COM port / baud | `COM6` / `115200` |
-| Broker hostname / port | hostname only / `8883` |
+| Broker hostname | `mqtt.nivalo.io` or `mqtt-staging.nivalo.io` |
+| Broker TLS port | `8883` or `8884`, matching environment |
+| Leaf certificate SAN / expiry | |
+| Certificate issuer/intermediate chain | subjects and SHA-256 fingerprints |
+| Trusted root subject / SHA-256 fingerprint | |
+| CA source | firmware default ISRG X1/X2, tester override, or claim response |
 | Valid TLS result and timestamp | |
 | Invalid-CA result and timestamp | |
 | Invalid-hostname result and timestamp | |
@@ -108,4 +143,3 @@ tester sketch intentionally exercises pre-existing credentials.
 
 Mark the drill complete only when every executed case has sanitized evidence and
 the approved configuration is restored.
-
