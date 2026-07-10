@@ -1,0 +1,31 @@
+{
+  "acceptedLocalHosts": [
+    "localhost",
+    "broker",
+    "broker.local",
+    "broker.lan",
+    "broker.home.arpa",
+    "127.0.0.1",
+    "10.20.30.40",
+    "172.16.0.1",
+    "172.31.255.254",
+    "192.168.2.12",
+    "169.254.1.2",
+    "::1",
+    "fc00::1",
+    "fd12:3456::1",
+    "fe80::1"
+  ],
+  "rejectedPublicHosts": [
+    "mqtt.nivalo.io",
+    "broker.example.com",
+    "fcloud.example",
+    "fdomain.example",
+    "fe80.example",
+    "10.evil.example",
+    "192.168.attacker.example",
+    "172.16.attacker.example",
+    "8.8.8.8",
+    "172.32.0.1"
+  ]
+}

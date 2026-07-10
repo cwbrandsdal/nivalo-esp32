@@ -1,0 +1,19 @@
+{
+  "target": "esp32",
+  "sizeBytes": 44,
+  "sha256": "cb73abe3489dedde33ec2eca58f9c5120e55a311612744942ab27a76fb402b12",
+  "imageBase64": "Tml2YWxvIGRldGVybWluaXN0aWMgZmlybXdhcmUgZml4dHVyZSB2MQABAv8=",
+  "manifestUtf8": "NIVALO-FIRMWARE-SIGNATURE-V1\nesp32\n44\ncb73abe3489dedde33ec2eca58f9c5120e55a311612744942ab27a76fb402b12\n",
+  "keys": [
+    {
+      "keyId": "fixture-current-2026-07",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEkt5PQFpkkoXsOwE6zgA79hbZpTgF\nywqZcnF2FSKjA5ZXoeT5BQqbeUboRGiVq9bNu0LeB1D2OOB7Kz09zytiJQ==\n-----END PUBLIC KEY-----\n",
+      "signatureBase64": "MEUCIQDOb9nFrwiBHup2UnriM2TXHrjkFpyrLt5GUX3SUYriHwIgYa3IDXgVtxRpqwxd1s4qHRe07yP//tP1oM/r8d3RarU="
+    },
+    {
+      "keyId": "fixture-previous-2026-01",
+      "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE5hLtGgXSs3ko5F66J+1uxRztrESK\nkTEOUE8s3ZxsaJoN5hcnAXw7FYDq/A0vSOsZWjh2rmcK1Z2zcs3JclDhlg==\n-----END PUBLIC KEY-----\n",
+      "signatureBase64": "MEYCIQDXbJJFPJvUS8UEbrxY0Zfl+mzLkredpHkhRwneGt2/FQIhAJZPKscUi/5slDKCd6+ZGkL61XbGsS1krNExa8+n5PxF"
+    }
+  ]
+}

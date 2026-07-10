@@ -1,0 +1,14 @@
+[
+  {"name":"factory-fresh","stored":false,"wifi":"none","claim":"none","action":"boot","expected":"setup-portal"},
+  {"name":"stored-connects","stored":true,"wifi":"connected","claim":"none","action":"boot","expected":"ready"},
+  {"name":"stored-wifi-timeout","stored":true,"wifi":"timeout","claim":"none","action":"boot","expected":"setup-portal-retain-old"},
+  {"name":"claim-success","stored":false,"wifi":"connected","claim":"valid","action":"submit","expected":"atomic-commit-ready"},
+  {"name":"claim-rejected","stored":false,"wifi":"connected","claim":"rejected","action":"submit","expected":"setup-portal-no-commit"},
+  {"name":"lost-claim-response","stored":false,"pending":true,"wifi":"connected","claim":"http-timeout","action":"retry","expected":"retry-same-pending-attempt"},
+  {"name":"reset-between-claim-attempts","stored":false,"pending":true,"wifi":"none","claim":"none","action":"reset","expected":"load-pending-and-retry-same-attempt"},
+  {"name":"exact-retry-after-server-commit","stored":false,"pending":true,"wifi":"connected","claim":"exact-retry","action":"retry","expected":"idempotent-same-nonsecret-response"},
+  {"name":"mismatched-replay","stored":false,"pending":true,"wifi":"connected","claim":"mismatched-replay","action":"retry","expected":"server-reject-no-commit"},
+  {"name":"expired-claim-code","stored":false,"pending":true,"wifi":"connected","claim":"expired","action":"retry-limit","expected":"setup-portal-replace-pending-attempt"},
+  {"name":"safe-wifi-change","stored":true,"wifi":"connected","claim":"none","action":"setup-submit","expected":"atomic-wifi-commit-ready"},
+  {"name":"setup-button","stored":true,"wifi":"connected","claim":"none","action":"button-hold","expected":"setup-portal-retain-old"}
+]

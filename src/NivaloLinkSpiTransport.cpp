@@ -1,10 +1,5 @@
 #include "NivaloLinkSpiTransport.h"
 
-static constexpr uint8_t NIVALO_LINK_SPI_SCK = 5;
-static constexpr uint8_t NIVALO_LINK_SPI_MISO = 19;
-static constexpr uint8_t NIVALO_LINK_SPI_MOSI = 18;
-static constexpr uint8_t NIVALO_LINK_SPI_CS = 33;
-static constexpr uint8_t NIVALO_LINK_STM_DATA_READY = 26;
 static constexpr uint32_t NIVALO_LINK_SPI_CLOCK_HZ = 500000UL;
 static constexpr uint16_t NIVALO_LINK_SPI_CS_SETUP_US = 10U;
 static constexpr uint16_t NIVALO_LINK_SPI_CS_HOLD_US = 10U;
@@ -50,12 +45,13 @@ static uint32_t readLe32(const uint8_t *buffer, size_t offset)
            ((uint32_t)buffer[offset + 3U] << 24U);
 }
 
-bool NivaloLinkSpiTransport::begin()
+bool NivaloLinkSpiTransport::begin(const NivaloLinkPinMap &pins)
 {
-    SPI.begin(NIVALO_LINK_SPI_SCK, NIVALO_LINK_SPI_MISO, NIVALO_LINK_SPI_MOSI, NIVALO_LINK_SPI_CS);
-    pinMode(NIVALO_LINK_SPI_CS, OUTPUT);
-    digitalWrite(NIVALO_LINK_SPI_CS, HIGH);
-    pinMode(NIVALO_LINK_STM_DATA_READY, INPUT_PULLDOWN);
+    _pins = pins;
+    SPI.begin(_pins.sck, _pins.miso, _pins.mosi, _pins.chipSelect);
+    pinMode(_pins.chipSelect, OUTPUT);
+    digitalWrite(_pins.chipSelect, HIGH);
+    pinMode(_pins.dataReady, INPUT_PULLDOWN);
     memset(_txFrame, 0, sizeof(_txFrame));
     memset(_rxFrame, 0, sizeof(_rxFrame));
     _started = true;
@@ -67,7 +63,7 @@ bool NivaloLinkSpiTransport::begin()
 void NivaloLinkSpiTransport::setPaused(bool paused)
 {
     _paused = paused;
-    digitalWrite(NIVALO_LINK_SPI_CS, HIGH);
+    digitalWrite(_pins.chipSelect, HIGH);
 }
 
 bool NivaloLinkSpiTransport::isPaused() const
@@ -77,7 +73,7 @@ bool NivaloLinkSpiTransport::isPaused() const
 
 bool NivaloLinkSpiTransport::dataReady() const
 {
-    return digitalRead(NIVALO_LINK_STM_DATA_READY) == HIGH;
+    return digitalRead(_pins.dataReady) == HIGH;
 }
 
 bool NivaloLinkSpiTransport::exchange(uint8_t type, const char *jsonPayload, NivaloLinkReceivedFrame *received)
@@ -114,11 +110,11 @@ bool NivaloLinkSpiTransport::exchange(uint8_t type, const char *jsonPayload, Niv
     buildFrame(type, jsonPayload);
 
     SPI.beginTransaction(SPISettings(NIVALO_LINK_SPI_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-    digitalWrite(NIVALO_LINK_SPI_CS, LOW);
+    digitalWrite(_pins.chipSelect, LOW);
     delayMicroseconds(NIVALO_LINK_SPI_CS_SETUP_US);
     SPI.transferBytes(_txFrame, _rxFrame, NIVALO_LINK_SPI_FRAME_SIZE);
     delayMicroseconds(NIVALO_LINK_SPI_CS_HOLD_US);
-    digitalWrite(NIVALO_LINK_SPI_CS, HIGH);
+    digitalWrite(_pins.chipSelect, HIGH);
     delayMicroseconds(NIVALO_LINK_SPI_INTERFRAME_US);
     SPI.endTransaction();
 

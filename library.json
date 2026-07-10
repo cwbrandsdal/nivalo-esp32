@@ -1,6 +1,6 @@
 {
   "name": "NivaloDevice",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "ESP32 device and bridge library for Nivalo IoT.",
   "keywords": [
     "nivalo",
@@ -37,11 +37,6 @@
       "owner": "adafruit",
       "name": "Adafruit NeoPixel",
       "version": "^1.10.0"
-    },
-    {
-      "owner": "adafruit",
-      "name": "Adafruit DAP library",
-      "version": "^1.8.0"
     }
   ]
 }

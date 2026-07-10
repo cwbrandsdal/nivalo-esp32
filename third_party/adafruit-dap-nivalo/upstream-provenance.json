@@ -1,0 +1,29 @@
+{
+  "repository": "https://github.com/adafruit/Adafruit_DAP",
+  "tag": "1.8.3",
+  "commit": "8ca356d92e73d0d1005534030849e7ca37324805",
+  "retrievedAtUtc": "2026-07-10T22:08:00Z",
+  "hashNormalization": "CRLF to LF; trailing blank lines collapsed to one final newline",
+  "licenseFile": "license.txt",
+  "modifiedFiles": [
+    "Adafruit_DAP_STM32.cpp",
+    "library.properties"
+  ],
+  "filesSha256": {
+    "Adafruit_DAP.cpp": "90a0cfb188d3f3fc48e1ebd8d974f7da0059e8f0d04c747aafc77dffd604a76b",
+    "Adafruit_DAP.h": "4c37f6b10603581d2bd86207f59b4be8ba2cc1def82045df7665ecdab89b55ea",
+    "Adafruit_DAP_nRF5x.cpp": "0e5369d08ea2b572af2e19083859bb61f6bdbcd3fdf1c25c54b2e8112f7d5fd4",
+    "Adafruit_DAP_nRF5x.h": "28f88858c3501050062ce055c271351685207f96090280bd44bab00612866c2d",
+    "Adafruit_DAP_SAM.cpp": "ae8243da369cef4f9dd80d91f4e3b73bcae70bee3cb47039da3d208af3cdddbe",
+    "Adafruit_DAP_SAM.h": "affcebb917678089e411cebe5d754b6a6b105b6707200459aecd0fca2ca253b7",
+    "Adafruit_DAP_SAMx5.cpp": "707489bce09efc6b3133ea069cafcccd2089faceab911fd23d3a611814ec1cb1",
+    "Adafruit_DAP_STM32.cpp": "bed4777b7f12f5a3f808540d44b36836a10e1f598b444867fe0df97f86c8d2cc",
+    "Adafruit_DAP_STM32.h": "b61999dcb6e1c96d3b5f3bcaaefda28f9db493c2dd765dd955d61d4331baae06",
+    "dap.cpp": "5483775c9ad9e2594e6c8c6f5ee457c3302f238992c925fb2b626cd0a180c67e",
+    "dap.h": "beda681f44ffdcfc51e10a3c95015833de240596abed2609c9019bcaf7903080",
+    "dap_config.h": "965a98ebd9c9448b1a08fc101534beecfe610e60873f5eec74201ba0abd16092",
+    "library.properties": "2a6026325f3b614db19910611b2d579f6ffb627f9d33353d58addae31d40fdf9",
+    "license.txt": "7f86e5d160153e48c4a6ded7be509abb159040227cbb9675384d935ece299caf",
+    "README.md": "1dddd3b565792143b2583b67728607289ce6b1c458aa66ebce7ce42f4b9ca797"
+  }
+}

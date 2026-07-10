@@ -1,0 +1,10 @@
+[
+  {"failures": 0, "baseMs": 1000},
+  {"failures": 1, "baseMs": 2000},
+  {"failures": 2, "baseMs": 4000},
+  {"failures": 3, "baseMs": 8000},
+  {"failures": 4, "baseMs": 16000},
+  {"failures": 5, "baseMs": 32000},
+  {"failures": 6, "baseMs": 60000},
+  {"failures": 10, "baseMs": 60000}
+]
