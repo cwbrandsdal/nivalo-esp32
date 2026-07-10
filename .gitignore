@@ -7,3 +7,5 @@ examples/**/include/nivalo_config.h
 build/
 dist/
 .release-stage/
+**/__pycache__/
+*.py[cod]
