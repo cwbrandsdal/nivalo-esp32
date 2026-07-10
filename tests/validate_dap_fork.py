@@ -5,13 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE = ROOT.parent
-EXAMPLES_ROOT = Path(os.environ.get("NIVALO_EXAMPLES_DIR", WORKSPACE / "nivalo-examples"))
 FORK = ROOT / "third_party/adafruit-dap-nivalo"
 SOURCE = FORK / "source"
 
@@ -57,6 +54,7 @@ def main() -> None:
         b"maintainer=Nivalo firmware maintainers": b"maintainer=Adafruit <info@adafruit.com>",
         b"sentence=Maintained Nivalo fork of Adafruit DAP for verified ARM Cortex programming": b"sentence=Arduino library for DAP programming on ARM cortex microcontroller",
         b"paragraph=Adafruit DAP 1.8.3 plus the reviewed STM32 compatibility required by Nivalo secondary-MCU OTA": b"paragraph=Arduino library for DAP programming on ARM cortex microcontroller",
+        b"depends=Adafruit SPIFlash (=5.1.1), SdFat - Adafruit Fork (=2.3.103), Adafruit TinyUSB Library (=3.7.7), SD": b"depends=Adafruit SPIFlash, SdFat - Adafruit Fork, Adafruit TinyUSB Library, SD",
     }
     for current, upstream in replacements.items():
         assert upstream_properties.count(current) == 1
@@ -68,12 +66,16 @@ def main() -> None:
     assert manifest["plannedPackage"]["version"] == "1.8.3-nivalo.1"
 
     internal = (ROOT / "examples/Esp32Stm32Bridge/platformio.ini").read_text(encoding="utf-8")
-    external = (EXAMPLES_ROOT / "esp32-stm32-bridge/platformio.ini").read_text(encoding="utf-8")
     assert manifest["localReplacementPaths"]["libraryExample"] in internal
-    assert manifest["localReplacementPaths"]["externalExample"] in external
     assert "-I../../third_party/adafruit-dap-nivalo/source" in internal
-    assert "-I../../nivalo-esp32/third_party/adafruit-dap-nivalo/source" in external
-    assert "adafruit/Adafruit DAP library" not in internal + external
+    assert "adafruit/Adafruit DAP library" not in internal
+    for dependency in (
+        "adafruit/Adafruit SPIFlash@5.1.1",
+        "adafruit/Adafruit TinyUSB Library@3.7.7",
+        "adafruit/SdFat - Adafruit Fork@2.3.103",
+        "fortyseveneffects/MIDI Library@5.0.2",
+    ):
+        assert dependency in internal
 
     library = json.loads((ROOT / "library.json").read_text(encoding="utf-8"))
     assert all(dependency["name"] != "Adafruit DAP library" for dependency in library["dependencies"])

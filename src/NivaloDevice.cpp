@@ -65,10 +65,7 @@ void NivaloDevice::loop()
             Serial.println(commandName);
             const char *payload = doc["payload"];
 
-            if (commandName == "function")
-            {
-            }
-            else if (commandName == "publish")
+            if (commandName == "publish")
             {
                 String output;
                 serializeJson(doc, output);

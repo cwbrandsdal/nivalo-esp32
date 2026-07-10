@@ -11,9 +11,7 @@ from jsonschema import Draft202012Validator
 
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE = ROOT.parent
-PROTOCOL_ROOT = Path(os.environ.get("NIVALO_PROTOCOL_DIR", WORKSPACE / "nivalo-protocol"))
-EXAMPLES_ROOT = Path(os.environ.get("NIVALO_EXAMPLES_DIR", WORKSPACE / "nivalo-examples"))
+PROTOCOL_ROOT = Path(os.environ.get("NIVALO_PROTOCOL_DIR", ROOT.parent / "nivalo-protocol"))
 
 
 def dispatch(case: dict[str, object]) -> tuple[str, list[str]]:
@@ -83,16 +81,11 @@ def main() -> None:
     assert (device + sdk + link).count("appendSdkDefinitions(") >= 4  # method plus local, SPI, and UART publication paths
     assert 'Serial.print((char)message[i])' not in callback
 
-    examples = [
-        ROOT / "examples/Esp32Only/src/main.cpp",
-        EXAMPLES_ROOT / "esp32-standalone/src/main.cpp",
-    ]
-    for example in examples:
-        if example.exists():
-            source = example.read_text()
-            assert 'device.function("setLed", setLed)' in source
-            assert 'device.variable("ledState", &ledState)' in source
-            assert "device.publishVariables()" in source
+    example = ROOT / "examples/Esp32Only/src/main.cpp"
+    source = example.read_text()
+    assert 'device.function("setLed", setLed)' in source
+    assert 'device.variable("ledState", &ledState)' in source
+    assert "device.publishVariables()" in source
 
     print("validated SDK definitions, local ACK lifecycle, fallback order, and standalone registrations")
 

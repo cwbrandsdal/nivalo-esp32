@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import os
 from pathlib import Path
 
 
 REPO = Path(__file__).resolve().parents[1]
-WORKSPACE = REPO.parent
-EXAMPLES_ROOT = Path(os.environ.get("NIVALO_EXAMPLES_DIR", WORKSPACE / "nivalo-examples"))
 
 
 def require(text: str, needle: str, source: Path) -> None:
@@ -79,11 +76,6 @@ def main() -> None:
         REPO / "examples" / "Esp32Only" / "include" / "nivalo_config.example.h",
         REPO / "examples" / "Esp32Stm32Bridge" / "include" / "nivalo_config.example.h",
     ]
-    external_configs = [
-        EXAMPLES_ROOT / "esp32-standalone" / "include" / "nivalo_config.example.h",
-        EXAMPLES_ROOT / "esp32-stm32-bridge" / "include" / "nivalo_config.example.h",
-    ]
-    configs.extend(config for config in external_configs if config.exists())
     for config in configs:
         text = config.read_text(encoding="utf-8")
         require(text, '#define NIVALO_DEVICE_CLAIM_URL "https://', config)

@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 import json
 import base64
-import os
 from pathlib import Path
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-ROOT=Path(__file__).resolve().parents[1]; WORKSPACE=ROOT.parent
-EXAMPLES_ROOT=Path(os.environ.get("NIVALO_EXAMPLES_DIR", WORKSPACE/"nivalo-examples"))
+ROOT=Path(__file__).resolve().parents[1]
 
 def transition(c):
     if c["action"]=="button-hold": return "setup-portal-retain-old"
@@ -53,8 +51,6 @@ def main():
         assert "NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE 0" in cfg
         assert "NIVALO_WIFI_SSID" not in cfg and "NIVALO_IOT_MQTT_PASSWORD" not in cfg
         assert "NIVALO_MQTT_TRANSPORT_TLS" in main_source
-    external=EXAMPLES_ROOT/"esp32-standalone/src/main.cpp"
-    if external.exists(): assert "NivaloProvisioning provisioning" in external.read_text()
     assert not any(token in source for token in (
         'Serial.println(body)', 'Serial.println(response)', 'Serial.println(signature)',
         'Serial.println(_claimAttempt.claimCode)', 'Serial.println(_claimAttempt.mqttCredential)'))

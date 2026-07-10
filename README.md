@@ -186,6 +186,12 @@ The maintained fork is active for repository bridge builds under
 `third_party/adafruit-dap-nivalo/`. It vendors official tag `1.8.3` with commit,
 license, and per-file hash provenance, adds STM32 ID `0x421` in maintained
 source, and uses explicit local dependency paths—never a build-time patch.
+Repository builds pin Espressif32 7.0.1 and every external Arduino dependency
+to an exact version; the framework-provided `SD` library remains local to the
+pinned Espressif32 platform. ESP32 CI validates only this repository and the
+pinned protocol contracts. The examples repository owns its cross-repository
+builds against one immutable ESP32 commit, avoiding a circular CI dependency.
+
 No remote or package has been created. Until publication, external bridge
 consumers must supply the fork explicitly rather than relying on registry
 dependency resolution.

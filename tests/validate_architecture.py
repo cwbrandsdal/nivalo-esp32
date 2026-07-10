@@ -71,18 +71,26 @@ def main() -> None:
     assert not list(ROOT.glob("examples/**/patch_adafruit_dap_stm32.py"))
     assert 'Serial.println(doc["payload"]' not in all_device_sources
     assert "Serial.print((char)message[i])" not in all_device_sources
-    bridge_paths = [ROOT / "examples/Esp32Stm32Bridge/src/main.cpp"]
-    external_bridge = ROOT.parent / "nivalo-examples/esp32-stm32-bridge/src/main.cpp"
-    if external_bridge.exists():
-        bridge_paths.append(external_bridge)
-    for bridge_path in bridge_paths:
+    for bridge_path in [ROOT / "examples/Esp32Stm32Bridge/src/main.cpp"]:
         bridge = bridge_path.read_text()
         assert len(bridge.splitlines()) <= 140
         for abandoned in ("BLEDevice", "WebServer", "SPIFFS", "STATE_LOAD_SETTINGS", "setupSpiffsAndGetSettings"):
             assert abandoned not in bridge
+    assert 'if (commandName == "function")' not in device
     metadata = json.loads((ROOT / "library.json").read_text())
     assert metadata["version"] == "0.2.0"
+    assert {d["name"]: d["version"] for d in metadata["dependencies"]} == {
+        "PubSubClient": "2.8",
+        "ArduinoJson": "6.21.6",
+        "Adafruit NeoPixel": "1.15.5",
+    }
     assert all(d["name"] != "Adafruit DAP library" for d in metadata["dependencies"])
+    for project in ("Esp32Only", "Esp32Stm32Bridge"):
+        platformio = (ROOT / "examples" / project / "platformio.ini").read_text()
+        assert "platform = espressif32@7.0.1" in platformio
+        assert "knolleary/PubSubClient@2.8" in platformio
+        assert "bblanchon/ArduinoJson@6.21.6" in platformio
+        assert "adafruit/Adafruit NeoPixel@1.15.5" in platformio
     fork = json.loads((ROOT / "third_party/adafruit-dap-nivalo/fork-manifest.json").read_text())
     assert fork["upstreamRepository"] == "https://github.com/adafruit/Adafruit_DAP"
     assert fork["upstreamRelease"] == "1.8.3"
