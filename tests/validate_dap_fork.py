@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKSPACE = ROOT.parent
+EXAMPLES_ROOT = Path(os.environ.get("NIVALO_EXAMPLES_DIR", WORKSPACE / "nivalo-examples"))
 FORK = ROOT / "third_party/adafruit-dap-nivalo"
 SOURCE = FORK / "source"
 
@@ -66,7 +68,7 @@ def main() -> None:
     assert manifest["plannedPackage"]["version"] == "1.8.3-nivalo.1"
 
     internal = (ROOT / "examples/Esp32Stm32Bridge/platformio.ini").read_text(encoding="utf-8")
-    external = (WORKSPACE / "nivalo-examples/esp32-stm32-bridge/platformio.ini").read_text(encoding="utf-8")
+    external = (EXAMPLES_ROOT / "esp32-stm32-bridge/platformio.ini").read_text(encoding="utf-8")
     assert manifest["localReplacementPaths"]["libraryExample"] in internal
     assert manifest["localReplacementPaths"]["externalExample"] in external
     assert "-I../../third_party/adafruit-dap-nivalo/source" in internal

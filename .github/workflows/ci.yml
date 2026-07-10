@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+env:
+  NIVALO_PROTOCOL_REF: a08b02389074db3c134118ebf794577bab89692f
+  NIVALO_EXAMPLES_REF: 90acb8908376e104f0e3ba7c615418b0cd69ec19
+  NIVALO_PROTOCOL_DIR: ${{ github.workspace }}/.ci/nivalo-protocol
+  NIVALO_EXAMPLES_DIR: ${{ github.workspace }}/.ci/nivalo-examples
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -17,6 +23,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Require immutable private dependency keys
+        env:
+          NIVALO_PROTOCOL_DEPLOY_KEY: ${{ secrets.NIVALO_PROTOCOL_DEPLOY_KEY }}
+          NIVALO_EXAMPLES_DEPLOY_KEY: ${{ secrets.NIVALO_EXAMPLES_DEPLOY_KEY }}
+        run: |
+          [[ "$NIVALO_PROTOCOL_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$NIVALO_EXAMPLES_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "$NIVALO_PROTOCOL_DEPLOY_KEY" ]]
+          [[ -n "$NIVALO_EXAMPLES_DEPLOY_KEY" ]]
+      - name: Check out authoritative protocol contracts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: cwbrandsdal/nivalo-protocol
+          ref: ${{ env.NIVALO_PROTOCOL_REF }}
+          path: .ci/nivalo-protocol
+          ssh-key: ${{ secrets.NIVALO_PROTOCOL_DEPLOY_KEY }}
+          persist-credentials: false
+      - name: Check out pinned examples
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: cwbrandsdal/nivalo-examples
+          ref: ${{ env.NIVALO_EXAMPLES_REF }}
+          path: .ci/nivalo-examples
+          ssh-key: ${{ secrets.NIVALO_EXAMPLES_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
