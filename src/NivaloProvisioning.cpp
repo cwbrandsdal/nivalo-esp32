@@ -34,7 +34,7 @@ static bool isCanonicalUuid(const String &value)
 bool NivaloRuntimeCredentials::valid() const
 {
     return wifiSsid.length() > 0U && deviceId.length() > 0U && mqttHost.length() > 0U &&
-           mqttPort > 0U && mqttClientId.length() > 0U && mqttUsername.length() > 0U &&
+           (mqttPort == 8883U || mqttPort == 8884U) && mqttClientId.length() > 0U && mqttUsername.length() > 0U &&
            mqttPassword.length() >= 16U;
 }
 bool NivaloPendingClaimAttempt::valid() const
@@ -80,6 +80,14 @@ static bool parsePending(const String &json, NivaloPendingClaimAttempt &a)
     a.wifiSsid=d["wifiSsid"]|""; a.wifiPassword=d["wifiPassword"]|""; a.claimCode=d["claimCode"]|"";
     a.attemptId=d["attemptId"]|""; a.nonce=d["nonce"]|""; a.publicKeyPem=d["publicKeyPem"]|""; a.privateKeyPem=d["privateKeyPem"]|"";
     a.mqttCredential=d["mqttCredential"]|""; a.credentialSha256=d["credentialSha256"]|""; a.signatureBase64=d["signatureBase64"]|""; return a.valid();
+}
+
+static bool pendingIdentityWasCommitted(const NivaloRuntimeCredentials &credentials,
+                                        const NivaloPendingClaimAttempt &attempt)
+{
+    return credentials.valid() && attempt.valid() &&
+           credentials.mqttPassword == attempt.mqttCredential &&
+           credentials.devicePrivateKeyPem == attempt.privateKeyPem;
 }
 
 bool NivaloProvisioningStore::begin(bool allowUnencryptedDevelopment)
@@ -134,12 +142,22 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
     }
     if (_config.setupButtonPin >= 0)
         pinMode(_config.setupButtonPin, _config.setupButtonActiveLow ? INPUT_PULLUP : INPUT_PULLDOWN);
-    if (_store.loadPending(_claimAttempt))
+    bool hasCredentials = _store.load(_credentials);
+    bool hasPendingAttempt = _store.loadPending(_claimAttempt);
+    if (hasCredentials && hasPendingAttempt && pendingIdentityWasCommitted(_credentials, _claimAttempt))
+    {
+        // The A/B selector is the commit point. A reset can occur after it is
+        // switched but before pending cleanup; never exchange that claim again.
+        _store.clearPending();
+        _claimAttempt = NivaloPendingClaimAttempt();
+        startWifi(_credentials.wifiSsid, _credentials.wifiPassword);
+    }
+    else if (hasPendingAttempt)
     {
         _pendingClaimCode=_claimAttempt.claimCode; _pending.wifiSsid=_claimAttempt.wifiSsid; _pending.wifiPassword=_claimAttempt.wifiPassword;
         startWifi(_claimAttempt.wifiSsid,_claimAttempt.wifiPassword);
     }
-    else if (_store.load(_credentials)) startWifi(_credentials.wifiSsid, _credentials.wifiPassword);
+    else if (hasCredentials) startWifi(_credentials.wifiSsid, _credentials.wifiPassword);
     else startPortal();
     return true;
 }
@@ -241,8 +259,23 @@ void NivaloProvisioning::handlePortalSubmit()
         (!_changingWifiOnly && claim.length() != 8U)) { _web.send(400, "text/plain", "Invalid setup values"); return; }
     for (size_t i = 0; i < claim.length(); i++) if (!((claim[i] >= 'A' && claim[i] <= 'Z') || (claim[i] >= '2' && claim[i] <= '9'))) { _web.send(400, "text/plain", "Invalid setup values"); return; }
     _pending = NivaloRuntimeCredentials(); _pending.wifiSsid = ssid; _pending.wifiPassword = password; _pendingClaimCode = claim;
-    if (!_changingWifiOnly && (!createPendingAttempt(claim,ssid,password) || !_store.savePending(_claimAttempt)))
-    { _web.send(500,"text/plain","Could not secure pending claim"); return; }
+    if (!_changingWifiOnly)
+    {
+        bool reusePendingAttempt = _claimAttempt.valid() && claim == _claimAttempt.claimCode;
+        if (reusePendingAttempt)
+        {
+            _claimAttempt.wifiSsid = ssid;
+            _claimAttempt.wifiPassword = password;
+        }
+        else if (!createPendingAttempt(claim, ssid, password))
+        {
+            _web.send(500, "text/plain", "Could not secure pending claim"); return;
+        }
+        if (!_store.savePending(_claimAttempt))
+        {
+            _web.send(500, "text/plain", "Could not secure pending claim"); return;
+        }
+    }
     if (!_changingWifiOnly) { _claimFailures = 0U; _claimRetryAt = 0U; }
     _web.send(202, "text/plain", "Connecting; this setup network will close."); startWifi(ssid, password);
 }
@@ -315,7 +348,8 @@ bool NivaloProvisioning::exchangeClaim()
         !mqtt.is<JsonObject>() || (mqtt.size() != 5U && mqtt.size() != 6U) ||
         (mqtt.size() == 6U && !mqtt.containsKey("caCertificatePem")) ||
         !mqtt["host"].is<const char *>() || !mqtt["clientId"].is<const char *>() || !mqtt["username"].is<const char *>() ||
-        !mqtt["port"].is<int>() || mqtt["port"].as<int>() != 8883 || !mqtt["useTls"].is<bool>() || mqtt["useTls"].as<bool>() != true ||
+        !mqtt["port"].is<int>() || (mqtt["port"].as<int>() != 8883 && mqtt["port"].as<int>() != 8884) ||
+        !mqtt["useTls"].is<bool>() || mqtt["useTls"].as<bool>() != true ||
         (mqtt.containsKey("caCertificatePem") && !mqtt["caCertificatePem"].isNull() && !mqtt["caCertificatePem"].is<const char *>()) ||
         mqtt.containsKey("password") || doc.containsKey("claimCode") || doc.containsKey("claimSecret"))
     { _lastError="Claim response invalid"; return false; }

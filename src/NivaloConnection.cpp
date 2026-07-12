@@ -71,7 +71,7 @@ void NivaloConnection::configure(const char *host, uint16_t port, const char *cl
     _host = host; _port = port; _clientId = clientId; _username = username; _password = password;
     _commandsTopic = commandsTopic; _availabilityTopic = availabilityTopic;
     _mqtt.setServer(_host.c_str(), _port);
-    _nextAttemptAt = 0U; _backoffMs = 1000U;
+    _retryPolicy.reset();
 }
 
 void NivaloConnection::setLastWill(const String &payload) { _lastWill = payload; }
@@ -79,28 +79,21 @@ void NivaloConnection::setLastWill(const String &payload) { _lastWill = payload;
 void NivaloConnection::service(unsigned long now)
 {
     if (_mqtt.connected()) { _mqtt.loop(); return; }
-    if (_lastWill.length() == 0U || (long)(now - _nextAttemptAt) < 0) { return; }
+    const uint32_t nowMs = static_cast<uint32_t>(now);
+    if (_lastWill.length() == 0U || !_retryPolicy.isAttemptDue(nowMs)) { return; }
     bool ok = _mqtt.connect(_clientId.c_str(), _username.c_str(), _password.c_str(),
                             _availabilityTopic.c_str(), 1, true, _lastWill.c_str());
     if (ok)
     {
         _mqtt.subscribe(_commandsTopic.c_str());
-        _backoffMs = 1000U; _nextAttemptAt = now; _justConnected = true;
+        _retryPolicy.onSuccess(nowMs); _justConnected = true;
     }
-    else { scheduleRetry(now); }
-}
-
-void NivaloConnection::scheduleRetry(unsigned long now)
-{
-    unsigned long jitterWindow = _backoffMs / 4U + 1U;
-    unsigned long jitter = esp_random() % jitterWindow;
-    _nextAttemptAt = now + _backoffMs + jitter;
-    _backoffMs = min(_backoffMs * 2U, 60000UL);
+    else { _retryPolicy.onFailure(nowMs, esp_random()); }
 }
 
 bool NivaloConnection::connected() { return _mqtt.connected(); }
 bool NivaloConnection::publish(const char *topic, const char *payload, bool retained) { return _mqtt.connected() && _mqtt.publish(topic, payload, retained); }
 PubSubClient &NivaloConnection::client() { return _mqtt; }
 bool NivaloConnection::takeJustConnected() { bool value = _justConnected; _justConnected = false; return value; }
-unsigned long NivaloConnection::nextAttemptAt() const { return _nextAttemptAt; }
-unsigned long NivaloConnection::currentBackoffMs() const { return _backoffMs; }
+unsigned long NivaloConnection::nextAttemptAt() const { return _retryPolicy.nextAttemptAt(); }
+unsigned long NivaloConnection::currentBackoffMs() const { return _retryPolicy.currentBackoffMs(); }

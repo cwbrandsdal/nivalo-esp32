@@ -5,15 +5,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> None:
-    for case in json.loads((ROOT / "tests/reconnect_backoff_cases.json").read_text()):
-        expected = min(1000 * (2 ** case["failures"]), 60000)
-        assert case["baseMs"] == expected
-        assert case["baseMs"] <= case["baseMs"] + case["baseMs"] // 4
-
     device_path = ROOT / "src/NivaloDevice.cpp"
     device = device_path.read_text()
     header = (ROOT / "src/NivaloDevice.h").read_text()
     connection = (ROOT / "src/NivaloConnection.cpp").read_text()
+    reconnect_policy = (ROOT / "src/NivaloReconnectPolicy.cpp").read_text()
     protocol = (ROOT / "src/NivaloProtocol.cpp").read_text()
     ota = (ROOT / "src/NivaloOta.cpp").read_text()
     lifecycle = (ROOT / "src/NivaloDeviceLifecycle.cpp").read_text()
@@ -48,7 +44,12 @@ def main() -> None:
     assert "boolean begin(const NivaloDeviceConfig &config)" in header
     assert "NivaloPinMap" in header and "telemetryBufferCapacity" in header
     assert "while (!_mqtt.connected())" not in connection
-    assert "_backoffMs * 2U" in connection and "esp_random() % jitterWindow" in connection
+    assert "NivaloReconnectPolicy _retryPolicy" in (ROOT / "src/NivaloConnection.h").read_text()
+    assert "_retryPolicy.isAttemptDue(nowMs)" in connection
+    assert "_retryPolicy.onFailure(nowMs, esp_random())" in connection
+    assert "_retryPolicy.onSuccess(nowMs)" in connection
+    assert "Arduino" not in reconnect_policy and "esp_random" not in reconnect_policy
+    assert (ROOT / "tests/host/test_reconnect_policy.cpp").exists()
     assert "_availabilityTopic.c_str(), 1, true" in connection
     assert "configTime(0, 0" in protocol and "1970-01-01" not in all_device_sources
     assert all_device_sources.count("if (!_protocol.timeValid())") >= 3

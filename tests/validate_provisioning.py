@@ -10,9 +10,11 @@ ROOT=Path(__file__).resolve().parents[1]
 
 def transition(c):
     if c["action"]=="button-hold": return "setup-portal-retain-old"
+    if c["action"]=="reset" and c.get("pending") and c.get("committed_matches_pending"): return "load-committed-and-clean-pending"
     if c["action"]=="reset" and c.get("pending"): return "load-pending-and-retry-same-attempt"
     if c["claim"]=="http-timeout" and c.get("pending"): return "retry-same-pending-attempt"
     if c["claim"]=="exact-retry" and c.get("pending"): return "idempotent-same-nonsecret-response"
+    if c["claim"]=="same-code" and c.get("pending") and c["action"]=="setup-submit": return "reuse-pending-attempt-with-new-wifi"
     if c["claim"]=="mismatched-replay": return "server-reject-no-commit"
     if c["claim"]=="expired" and c["action"]=="retry-limit": return "setup-portal-replace-pending-attempt"
     if not c["stored"] and c["action"]=="boot": return "setup-portal"
@@ -29,10 +31,28 @@ def main():
     assert source.index("putString(key, encoded)") < source.index('putString("active", next)')
     assert 'strncmp(_config.claimUrl, "https://", 8)' in source and "setCACert" in source and "setInsecure" not in source
     assert "HTTPC_DISABLE_FOLLOW_REDIRECTS" in source
-    assert 'mqtt["port"].as<int>() != 8883' in source and 'doc.containsKey("claimSecret")' in source
+    assert 'mqtt["port"].as<int>() != 8883 && mqtt["port"].as<int>() != 8884' in source
+    assert "mqttPort == 8883U || mqttPort == 8884U" in source
+    assert 'doc.containsKey("claimSecret")' in source
     assert "NIVALO-DEVICE-CLAIM-V1\\n" in source and "MBEDTLS_ECP_DP_SECP256R1" in source
-    assert source.index("_store.loadPending(_claimAttempt)") < source.index("_store.load(_credentials)")
+    assert source.index("_store.load(_credentials)") < source.index("_store.loadPending(_claimAttempt)")
+    assert "pendingIdentityWasCommitted(_credentials, _claimAttempt)" in source
+    reconcile_start = source.index("if (hasCredentials && hasPendingAttempt")
+    reconcile_end = source.index("else if (hasPendingAttempt)", reconcile_start)
+    reconcile_branch = source[reconcile_start:reconcile_end]
+    assert "_store.clearPending()" in reconcile_branch
+    assert "startWifi(_credentials.wifiSsid, _credentials.wifiPassword)" in reconcile_branch
+    assert "exchangeClaim" not in reconcile_branch
     assert source.index("_store.savePending(_claimAttempt)") < source.index("startWifi(ssid, password)")
+    assert "reusePendingAttempt = _claimAttempt.valid() && claim == _claimAttempt.claimCode" in source
+    reuse_start = source.index("if (reusePendingAttempt)")
+    reuse_end = source.index("else if (!createPendingAttempt", reuse_start)
+    reuse_branch = source[reuse_start:reuse_end]
+    assert "_claimAttempt.wifiSsid = ssid" in reuse_branch
+    assert "_claimAttempt.wifiPassword = password" in reuse_branch
+    assert "createPendingAttempt" not in reuse_branch
+    for preserved in ("attemptId", "nonce", "publicKeyPem", "privateKeyPem", "mqttCredential", "credentialSha256", "signatureBase64"):
+        assert f"_claimAttempt.{preserved} =" not in reuse_branch
     for field in ('request["attemptId"]', 'request["mqttCredential"]', 'request["proof"]["credentialSha256"]'):
         assert field in source
     assert 'doc["mqtt"]["password"]' not in source
@@ -40,7 +60,8 @@ def main():
     assert 'mqtt.size() == 6U && !mqtt.containsKey("caCertificatePem")' in source
     assert "_claimRetryAt=millis()+min(60000UL" in source
     assert "_claimFailures = 0U; _claimRetryAt = 0U" in source
-    assert source.index("_store.commit(_pending)") < source.index("_store.clearPending()")
+    claim_success = source.index("if (exchangeClaim() && verifyExistingIdentity() && _store.commit(_pending))")
+    assert claim_success < source.index("_store.clearPending()", claim_success)
     assert 'Serial.println(_pendingClaimCode)' not in source and 'Serial.println(password)' not in source
     assert "while (WiFi.status()" not in source
     assert "verifyExistingIdentity() && _store.commit(_pending)" in source and "mqtt.setSocketTimeout(3)" in source

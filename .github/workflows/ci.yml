@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  NIVALO_PROTOCOL_REF: a08b02389074db3c134118ebf794577bab89692f
+  NIVALO_PROTOCOL_REF: cb25ab0997c02bc7c16f757e685ef209bac22d34
   NIVALO_PROTOCOL_DIR: ${{ github.workspace }}/.ci/nivalo-protocol
 
 concurrency:
@@ -17,6 +17,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - name: Configure host behavior tests
+        run: cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release
+      - name: Build host behavior tests
+        run: cmake --build build/host --parallel
+      - name: Run host behavior tests
+        run: ctest --test-dir build/host --output-on-failure
+
   platformio-examples:
     runs-on: ubuntu-latest
     steps:

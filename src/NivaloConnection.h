@@ -6,6 +6,8 @@
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 
+#include "NivaloReconnectPolicy.h"
+
 class NivaloConnection
 {
 public:
@@ -26,14 +28,12 @@ public:
     unsigned long currentBackoffMs() const;
 
 private:
-    void scheduleRetry(unsigned long now);
     WiFiClient _plainClient;
     WiFiClientSecure _secureClient;
     PubSubClient _mqtt;
+    NivaloReconnectPolicy _retryPolicy;
     String _host, _clientId, _username, _password, _commandsTopic, _availabilityTopic, _lastWill;
     uint16_t _port = 8883;
-    unsigned long _nextAttemptAt = 0U;
-    unsigned long _backoffMs = 1000U;
     bool _justConnected = false;
 };
 

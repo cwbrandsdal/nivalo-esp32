@@ -14,6 +14,7 @@ src/
   NivaloDevice.h
   NivaloDevice.cpp
   NivaloConnection.*
+  NivaloReconnectPolicy.*
   NivaloProtocol.*
   NivaloOta.*
   NivaloStatusPixel.*
@@ -78,9 +79,16 @@ passwords, response bodies, and signatures are never printed.
 The response contains only a non-secret device/MQTT identity; the MQTT password
 never leaves the device. A lost response or reset reloads and retries the exact
 same attempt, allowing the server to return the same identity idempotently.
+Submitting the same still-pending code again reuses that attempt and its key
+material while allowing new Wi-Fi input; a different code creates a fresh
+attempt.
 After the returned MQTT TLS identity connects successfully, credentials and the
 device proof private key are promoted through an A/B Preferences slot: the inactive slot is
-written and read back before the active selector changes. Factory provisioning
+written and read back before the active selector changes. On boot, a pending
+attempt whose proof key and MQTT credential match the active identity is treated
+as already committed and cleaned up without repeating the claim exchange. This
+reconciles a reset between the active-selector write and pending-record removal.
+Factory provisioning
 therefore leaves no partial identity when Wi-Fi, HTTPS, validation, or storage
 fails. Existing devices can enter setup mode by holding the configured button for
 three seconds; submitting a blank claim code changes Wi-Fi atomically while
@@ -102,7 +110,8 @@ mismatched replay, verify the canonical proof, enforce audited hardware transfer
 store only a one-way verifier for the device-generated MQTT credential, and return the
 claim response schema without any reusable claim secret.
 
-MQTT uses certificate-validating TLS by default on port `8883`. Configure new
+MQTT uses certificate-validating TLS on production port `8883` or the isolated
+staging port `8884`; no other provisioned broker port is accepted. Configure new
 sketches through `NivaloMqttConfig`; the original positional `beginMqtt`
 overload remains available for source compatibility and also uses TLS. The
 built-in CA bundle trusts the current ISRG Root X1/X2 chains, and a custom
@@ -127,6 +136,16 @@ QoS 1 offline Last Will. SNTP is started during configuration and the client
 does not connect or publish envelopes until it can produce a real UTC `sentAt`;
 the former 1970 fallback is gone. The loop registers/resets the ESP task watchdog
 by default (30 seconds, configurable through `NivaloDeviceConfig`).
+
+The retry timing policy is Arduino-free and has deterministic host coverage for
+attempt gating, jitter bounds, the 60-second cap, success reset, and 32-bit
+`millis()` rollover:
+
+```sh
+cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host --parallel
+ctest --test-dir build/host --output-on-failure
+```
 
 Set `mqtt.telemetryBufferCapacity` from 1 through 8 to enable the optional
 in-memory bounded telemetry queue. Publish methods now return 1 only for an
