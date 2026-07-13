@@ -2,9 +2,14 @@
 #define NIVALO_PROVISIONING_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
+
+#include "NivaloCliProvisioningPolicy.h"
+#include "NivaloCliFrame.h"
+#include "NivaloCliTransaction.h"
 
 struct NivaloRuntimeCredentials
 {
@@ -44,6 +49,8 @@ struct NivaloProvisioningConfig
     unsigned long wifiConnectTimeoutMs = 20000UL;
     bool allowUnencryptedNvsForLocalDevelopment = false;
     const NivaloRuntimeCredentials *localDeveloperFixture = NULL;
+    bool enableCliSerial = true;
+    Stream *cliSerial = NULL;
 };
 
 class NivaloProvisioningStore
@@ -55,6 +62,9 @@ public:
     bool loadPending(NivaloPendingClaimAttempt &attempt);
     bool savePending(const NivaloPendingClaimAttempt &attempt);
     bool clearPending();
+    bool loadCliStaged(NivaloRuntimeCredentials &credentials);
+    bool stageCli(const NivaloRuntimeCredentials &credentials);
+    bool clearCliStaged();
     bool clear();
     bool storageProtected() const;
 private:
@@ -67,6 +77,9 @@ class NivaloProvisioning
 {
 public:
     NivaloProvisioning();
+    ~NivaloProvisioning();
+    NivaloProvisioning(const NivaloProvisioning &) = delete;
+    NivaloProvisioning &operator=(const NivaloProvisioning &) = delete;
     bool begin(const NivaloProvisioningConfig &config);
     void loop();
     void enterSetupMode();
@@ -77,6 +90,12 @@ public:
     const char *lastError() const { return _lastError.c_str(); }
 
 private:
+    void handleCliSerial();
+    void handleCliLine(char *line, size_t length);
+    bool handleCliProvision(JsonObject root, const String &requestId);
+    bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
+    void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
+    void resetCliFrame();
     void startWifi(const String &ssid, const String &password);
     void startPortal();
     void stopPortal();
@@ -105,6 +124,13 @@ private:
     uint8_t _claimFailures = 0U;
     unsigned long _claimRetryAt = 0U;
     String _lastError;
+    Stream *_cliSerial = NULL;
+    char *_cliLine = NULL;
+    NivaloCliFrame _cliFrame = NivaloCliFrame(
+        NivaloCliProvisioningPolicy::MaximumLineLength,
+        NivaloCliProvisioningPolicy::FrameTimeoutMs);
+    unsigned long _cliRestartAt = 0U;
+    bool _cliProvisioningAllowed = false;
 };
 
 #endif

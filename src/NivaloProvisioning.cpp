@@ -9,12 +9,14 @@
 #include <WiFiClientSecure.h>
 #include <ctype.h>
 #include <esp_flash_encrypt.h>
+#include <esp_mac.h>
 #include <esp_system.h>
 #include <mbedtls/base64.h>
 #include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
+#include <new>
 
 
 static bool isCanonicalUuid(const String &value)
@@ -54,6 +56,9 @@ static String serializeCredentials(const NivaloRuntimeCredentials &c)
     doc["devicePrivateKeyPem"] = c.devicePrivateKeyPem;
     String output; serializeJson(doc, output); return output;
 }
+
+static const char CliStageTombstone[] = "superseded";
+static const char PendingClaimTombstone[] = "superseded";
 
 static bool parseCredentials(const String &json, NivaloRuntimeCredentials &c)
 {
@@ -114,7 +119,10 @@ bool NivaloProvisioningStore::commit(const NivaloRuntimeCredentials &credentials
     String encoded = serializeCredentials(credentials);
     if (_preferences.putString(key, encoded) != encoded.length() || _preferences.getString(key, "") != encoded)
         return false;
-    return _preferences.putString("active", next) == 1U;
+    if (_preferences.putString("active", next) != 1U || _preferences.getString("active", "") != next)
+        return false;
+    NivaloRuntimeCredentials committed;
+    return load(committed) && serializeCredentials(committed) == encoded;
 }
 bool NivaloProvisioningStore::clear() { return _opened && _preferences.clear(); }
 bool NivaloProvisioningStore::loadPending(NivaloPendingClaimAttempt &a) { return _opened && parsePending(_preferences.getString("pending",""),a); }
@@ -123,25 +131,71 @@ bool NivaloProvisioningStore::savePending(const NivaloPendingClaimAttempt &a)
     if(!_opened||!a.valid())return false; String encoded=serializePending(a);
     return _preferences.putString("pending",encoded)==encoded.length() && _preferences.getString("pending","")==encoded;
 }
-bool NivaloProvisioningStore::clearPending() { return _opened && _preferences.remove("pending"); }
+bool NivaloProvisioningStore::clearPending()
+{
+    if (!_opened) return false;
+    const size_t length = sizeof(PendingClaimTombstone) - 1U;
+    return _preferences.putString("pending", PendingClaimTombstone) == length &&
+           _preferences.getString("pending", "") == PendingClaimTombstone;
+}
+bool NivaloProvisioningStore::loadCliStaged(NivaloRuntimeCredentials &credentials)
+{
+    return _opened && parseCredentials(_preferences.getString("cliStage", CliStageTombstone), credentials);
+}
+bool NivaloProvisioningStore::stageCli(const NivaloRuntimeCredentials &credentials)
+{
+    if (!_opened || !credentials.valid()) return false;
+    const String encoded = serializeCredentials(credentials);
+    return _preferences.putString("cliStage", encoded) == encoded.length() &&
+           _preferences.getString("cliStage", "") == encoded;
+}
+bool NivaloProvisioningStore::clearCliStaged()
+{
+    if (!_opened) return false;
+    const size_t length = sizeof(CliStageTombstone) - 1U;
+    return _preferences.putString("cliStage", CliStageTombstone) == length &&
+           _preferences.getString("cliStage", "") == CliStageTombstone;
+}
 
 NivaloProvisioning::NivaloProvisioning() : _web(80) {}
+NivaloProvisioning::~NivaloProvisioning() { delete[] _cliLine; }
 
 bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
 {
     _config = config;
+    _cliSerial = _config.enableCliSerial ? (_config.cliSerial == NULL ? &Serial : _config.cliSerial) : NULL;
+    if (_cliSerial != NULL && _cliLine == NULL)
+        _cliLine = new (std::nothrow) char[NivaloCliProvisioningPolicy::MaximumLineLength + 1U];
+    if (_cliSerial != NULL && _cliLine == NULL)
+    {
+        setError("CLI serial buffer allocation failed");
+        return false;
+    }
+    bool storeAvailable = _store.begin(_config.allowUnencryptedNvsForLocalDevelopment);
+    _cliProvisioningAllowed = storeAvailable && _config.localDeveloperFixture == NULL;
     if (_config.localDeveloperFixture != NULL)
     {
         _credentials = *_config.localDeveloperFixture;
         if (!_credentials.valid()) { setError("Local developer fixture is invalid"); return false; }
         startWifi(_credentials.wifiSsid, _credentials.wifiPassword); return true;
     }
-    if (!_store.begin(_config.allowUnencryptedNvsForLocalDevelopment))
+    if (!storeAvailable)
     {
         setError("Encrypted NVS/flash encryption is required"); return false;
     }
     if (_config.setupButtonPin >= 0)
         pinMode(_config.setupButtonPin, _config.setupButtonActiveLow ? INPUT_PULLUP : INPUT_PULLDOWN);
+    NivaloRuntimeCredentials cliStaged;
+    if (_store.loadCliStaged(cliStaged))
+    {
+        if (!finishCliProvisioning(cliStaged, false))
+        {
+            setError("Interrupted CLI provisioning recovery failed");
+            return false;
+        }
+        startWifi(_credentials.wifiSsid, _credentials.wifiPassword);
+        return true;
+    }
     bool hasCredentials = _store.load(_credentials);
     bool hasPendingAttempt = _store.loadPending(_claimAttempt);
     if (hasCredentials && hasPendingAttempt && pendingIdentityWasCommitted(_credentials, _claimAttempt))
@@ -170,6 +224,7 @@ void NivaloProvisioning::startWifi(const String &ssid, const String &password)
 
 void NivaloProvisioning::loop()
 {
+    handleCliSerial();
     if (_portalRunning) { _dns.processNextRequest(); _web.handleClient(); }
     if (_config.setupButtonPin >= 0)
     {
@@ -225,6 +280,171 @@ void NivaloProvisioning::loop()
             startPortal();
         }
     }
+}
+
+void NivaloProvisioning::resetCliFrame()
+{
+    _cliFrame.reset(_cliLine);
+}
+
+void NivaloProvisioning::handleCliSerial()
+{
+    if (_cliRestartAt != 0U && (long)(millis() - _cliRestartAt) >= 0)
+    {
+        if (_cliSerial != NULL) _cliSerial->flush();
+        ESP.restart();
+        return;
+    }
+    if (_cliSerial == NULL || _cliLine == NULL) return;
+    _cliFrame.expire(millis(), _cliLine);
+
+    size_t processed = 0U;
+    while (_cliSerial->available() > 0 && processed++ < 256U)
+    {
+        const int next = _cliSerial->read();
+        if (next < 0) break;
+        const NivaloCliFrameResult result = _cliFrame.push(static_cast<char>(next), millis(), _cliLine);
+        if (result == NIVALO_CLI_FRAME_READY)
+        {
+            const size_t length = _cliFrame.length();
+            _cliLine[length] = '\0';
+            handleCliLine(_cliLine, length);
+            resetCliFrame();
+            if (_cliRestartAt != 0U) return;
+        }
+        else if (result == NIVALO_CLI_FRAME_DROPPED) resetCliFrame();
+    }
+}
+
+void NivaloProvisioning::handleCliLine(char *line, size_t length)
+{
+    DynamicJsonDocument request(4096);
+    if (deserializeJson(request, line, length) != DeserializationError::Ok || !request.is<JsonObject>()) return;
+    JsonObject root = request.as<JsonObject>();
+    if (!root["schema"].is<const char *>() || !root["requestId"].is<const char *>()) return;
+    const String schema = root["schema"].as<String>();
+    const String requestId = root["requestId"].as<String>();
+    if (!NivaloCliProvisioningPolicy::isRequestId(requestId.c_str(), requestId.length())) return;
+
+    if (schema == "nivalo.cli.identify.v1")
+    {
+        if (root.size() != 2U)
+        {
+            sendCliResponse("nivalo.cli.identify.v1", requestId, false);
+            return;
+        }
+        sendCliResponse("nivalo.cli.identify.v1", requestId, true, true);
+    }
+    else if (schema == "nivalo.cli.provision.v1")
+    {
+        const bool ok = handleCliProvision(root, requestId);
+        sendCliResponse("nivalo.cli.provision.v1", requestId, ok);
+        if (ok) _cliRestartAt = millis() + 500UL;
+    }
+}
+
+bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &requestId)
+{
+    (void)requestId;
+    if (!_cliProvisioningAllowed || root.size() != 4U ||
+        !root["wifi"].is<JsonObject>() || !root["mqtt"].is<JsonObject>()) return false;
+    JsonObject wifi = root["wifi"].as<JsonObject>();
+    JsonObject mqtt = root["mqtt"].as<JsonObject>();
+    if (wifi.size() != 2U || mqtt.size() != 8U ||
+        !wifi["ssid"].is<const char *>() || !wifi["password"].is<const char *>() ||
+        !mqtt["deviceId"].is<const char *>() || !mqtt["host"].is<const char *>() ||
+        !mqtt["port"].is<unsigned int>() || !mqtt["useTls"].is<bool>() ||
+        !mqtt["clientId"].is<const char *>() || !mqtt["username"].is<const char *>() ||
+        !mqtt["password"].is<const char *>()) return false;
+
+    const String wifiSsid = wifi["ssid"].as<String>();
+    const String wifiPassword = wifi["password"].as<String>();
+    const String deviceId = mqtt["deviceId"].as<String>();
+    const String mqttHost = mqtt["host"].as<String>();
+    const unsigned int mqttPort = mqtt["port"].as<unsigned int>();
+    const String mqttClientId = mqtt["clientId"].as<String>();
+    const String mqttUsername = mqtt["username"].as<String>();
+    const String mqttPassword = mqtt["password"].as<String>();
+    if (!NivaloCliProvisioningPolicy::isWifiSsid(wifiSsid.c_str(), wifiSsid.length()) ||
+        !NivaloCliProvisioningPolicy::isWifiPassword(wifiPassword.c_str(), wifiPassword.length()) ||
+        !NivaloCliProvisioningPolicy::isCanonicalUuid(deviceId.c_str(), deviceId.length()) ||
+        !NivaloCliProvisioningPolicy::isMqttHost(mqttHost.c_str(), mqttHost.length()) ||
+        mqttPort > 65535U || !NivaloCliProvisioningPolicy::isTlsPort(static_cast<uint16_t>(mqttPort)) ||
+        mqtt["useTls"].as<bool>() != true ||
+        !NivaloCliProvisioningPolicy::isMqttIdentity(mqttClientId.c_str(), mqttClientId.length()) ||
+        !NivaloCliProvisioningPolicy::isMqttIdentity(mqttUsername.c_str(), mqttUsername.length()) ||
+        !NivaloCliProvisioningPolicy::isMqttPassword(mqttPassword.c_str(), mqttPassword.length())) return false;
+
+    NivaloRuntimeCredentials replacement;
+    replacement.wifiSsid = wifiSsid;
+    replacement.wifiPassword = wifiPassword;
+    replacement.deviceId = deviceId;
+    replacement.mqttHost = mqttHost;
+    replacement.mqttPort = static_cast<uint16_t>(mqttPort);
+    replacement.mqttClientId = mqttClientId;
+    replacement.mqttUsername = mqttUsername;
+    replacement.mqttPassword = mqttPassword;
+    if (!replacement.valid() || !finishCliProvisioning(replacement, true)) return false;
+
+    _pending = NivaloRuntimeCredentials();
+    _claimAttempt = NivaloPendingClaimAttempt();
+    _pendingClaimCode = "";
+    return true;
+}
+
+bool NivaloProvisioning::finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst)
+{
+    struct Operations
+    {
+        NivaloProvisioningStore &store;
+        const NivaloRuntimeCredentials &replacement;
+        NivaloRuntimeCredentials committed;
+
+        bool stage() { return store.stageCli(replacement); }
+        bool commitActive() { return store.commit(replacement); }
+        bool supersedePendingClaim() { return store.clearPending(); }
+        bool verifyActive()
+        {
+            return store.load(committed) &&
+                   serializeCredentials(committed) == serializeCredentials(replacement);
+        }
+        bool clearStage() { return store.clearCliStaged(); }
+    } operations = {_store, replacement, NivaloRuntimeCredentials()};
+
+    if (!replacement.valid()) return false;
+    const bool completed = stageFirst
+                               ? NivaloCliTransaction::start(operations)
+                               : NivaloCliTransaction::resume(operations);
+    if (!completed) return false;
+    _credentials = operations.committed;
+    return true;
+}
+
+void NivaloProvisioning::sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity)
+{
+    if (_cliSerial == NULL) return;
+    StaticJsonDocument<384> response;
+    response["schema"] = schema;
+    response["requestId"] = requestId;
+    response["ok"] = ok;
+    if (ok && includeIdentity)
+    {
+        uint8_t mac[6] = {0};
+        if (esp_efuse_mac_get_default(mac) != ESP_OK)
+        {
+            response["ok"] = false;
+        }
+        else
+        {
+            char macAddress[18];
+            snprintf(macAddress, sizeof(macAddress), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            response["macAddress"] = macAddress;
+            response["hardwareId"] = hardwareId();
+        }
+    }
+    serializeJson(response, *_cliSerial);
+    _cliSerial->write('\n');
 }
 
 void NivaloProvisioning::startPortal()

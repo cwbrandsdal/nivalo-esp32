@@ -101,6 +101,37 @@ flash encryption is absent. Local boards may opt in with
 compiled developer fixtures exist only inside
 `NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE`, which defaults to `0`.
 
+### CLI serial provisioning
+
+`NivaloProvisioning` also owns the versioned USB/UART boundary used by the
+Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
+`NivaloProvisioningConfig::cliSerial`) without coupling requests to diagnostic
+output:
+
+- `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
+- `nivalo.cli.provision.v1` accepts one exact Wi-Fi/MQTT TLS identity, writes a
+  durable recovery stage, commits to the inactive Preferences slot, verifies
+  both the slot and active selector, replaces any older claim with a verified
+  non-secret tombstone, clears the stage, and only then acknowledges and restarts;
+- input is NDJSON bounded to 16 KiB, 256 bytes of work per loop, and a five-second
+  frame lifetime; partial, malformed, oversized, extra-field, and unsupported
+  requests fail closed;
+- provisioning accepts only TLS ports `8883`/`8884`, a canonical device UUID,
+  bounded identities, and an open or valid WPA passphrase. The request and all
+credential values are wiped from the line buffer and never echoed or logged.
+
+Boot recovery completes a durable CLI stage before it considers a prior captive-
+portal claim. A reset or write failure at any transaction boundary therefore
+leaves a retryable stage and cannot acknowledge an identity that the next boot
+would silently replace.
+
+Serial identification remains available when storage is unavailable, but serial
+provisioning is rejected unless flash/NVS encryption is active or the existing
+explicit local-development exception is enabled. A compiled local developer
+fixture also disables serial provisioning because it would otherwise mask the
+committed identity after restart. Set `enableCliSerial` to `false` for products
+that do not expose this physical provisioning surface.
+
 The claim wire contract is published in `nivalo-protocol/specs/device-claim-v1.md`.
 The remaining backend/console work is deliberately not implemented here: create
 and display organization-scoped codes, expire within ten minutes, atomically
