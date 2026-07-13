@@ -115,16 +115,15 @@ Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
 output:
 
 - `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
-- `nivalo.cli.claim.v1` accepts Wi-Fi plus a one-use code only when its
-  `expectedHardwareId` exactly matches the same USB-connected ESP32. The device
-  creates and durably stages its P-256 proof/MQTT credential, performs the
-  certificate-validating HTTPS exchange and MQTT TLS verification itself,
-  atomically promotes the identity, then returns only `hardwareId` and
-  `deviceId` in the terminal acknowledgement. Claim proof keys and MQTT
-  credentials never cross the serial boundary. The active credential record
-  retains only the claim code's SHA-256 receipt, so retrying the same code after
-  a reset, USB loss, or missed acknowledgement returns the already-committed
-  identity without repeating the cloud claim; a different code is rejected;
+- `nivalo.cli.claim.v1` accepts that exact hardware ID, one bounded Wi-Fi
+  object, and an eight-character one-use code matching
+  `tests/cli_claim_request_v1.json`. It reuses the captive portal's
+  authoritative HTTPS proof flow: the ESP32 creates and durably stages its
+  P-256 proof and MQTT credential, performs the certificate-validating HTTPS
+  exchange and MQTT TLS verification itself, and acknowledges only after the
+  A/B identity commit and pending-secret cleanup. Its success response contains
+  only the request ID, hardware ID, device ID, and success state; proof keys and
+  MQTT credentials never cross the serial boundary;
 - `nivalo.cli.provision.v1` accepts one exact Wi-Fi object and seven-field MQTT
   TLS identity matching `tests/cli_provision_request_v1.json`, writes a
   durable recovery stage, commits to the inactive Preferences slot, verifies
@@ -135,7 +134,19 @@ output:
   requests fail closed;
 - provisioning accepts only TLS ports `8883`/`8884`, a canonical device UUID,
   bounded identities, and an open or valid WPA passphrase. The request and all
-credential values are wiped from the line buffer and never echoed or logged.
+  credential values are wiped from the line buffer and never echoed or logged.
+
+After a successful claim, encrypted NVS retains only the code's SHA-256 receipt
+with the active identity. If USB is lost after the commit but before the
+terminal response, repeating the same serial request returns the committed
+device ID without another HTTPS exchange. A different code cannot replace an
+active identity through this factory serial path; use the explicit reset or
+audited transfer workflow. The receipt is a local recovery discriminator, not
+an authentication credential: it is never returned or logged, is accepted only
+over the physical serial boundary for the exact hardware ID, and is never
+stored when encrypted NVS is unavailable outside the explicit development
+exception. A later Wi-Fi change or direct credential replacement invalidates
+the receipt.
 
 Boot recovery completes a durable CLI stage before it considers a prior captive-
 portal claim. A reset or write failure at any transaction boundary therefore

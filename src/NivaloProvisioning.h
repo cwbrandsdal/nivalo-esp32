@@ -104,7 +104,8 @@ private:
     bool handleCliClaim(JsonObject root, const String &requestId);
     bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
     void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
-    void sendCliClaimResponse(bool ok);
+    void sendCliClaimResponse(const String &requestId, bool ok);
+    void failCliClaim();
     void resetCliFrame();
     void startWifi(const String &ssid, const String &password);
     void startTimeSync(bool resetAttempts);

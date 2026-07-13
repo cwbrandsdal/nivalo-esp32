@@ -41,6 +41,8 @@ def main():
     reconcile_end = source.index("else if (hasPendingAttempt)", reconcile_start)
     reconcile_branch = source[reconcile_start:reconcile_end]
     assert "_store.clearPending()" in reconcile_branch
+    assert "if (!_store.clearPending())" in reconcile_branch
+    assert 'setError("Committed claim cleanup recovery failed")' in reconcile_branch
     assert "startWifi(_credentials.wifiSsid, _credentials.wifiPassword)" in reconcile_branch
     assert "exchangeClaim" not in reconcile_branch
     assert source.index("_store.savePending(_claimAttempt)") < source.index("startWifi(ssid, password)")

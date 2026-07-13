@@ -1,4 +1,5 @@
 #include "NivaloCliProvisioningPolicy.h"
+#include "NivaloCliClaimRecoveryPolicy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -23,6 +24,20 @@ int main()
     require(!isRequestId("abc", 3U), "short request ID accepted");
     const std::string requestWithNewline = std::string(31U, 'a') + "\n";
     require(!isRequestId(requestWithNewline.c_str(), requestWithNewline.size()), "request ID control accepted");
+
+    using namespace NivaloCliClaimRecoveryPolicy;
+    require(resumeAction(false, false, false, false) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
+            "unrelated transition accepted a claim replay");
+    require(resumeAction(false, false, true, true) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
+            "connected unrelated transition accepted a claim replay");
+    require(resumeAction(true, false, false, false) == NIVALO_CLI_CLAIM_PRESERVE_STATE,
+            "ready state was overridden by claim replay");
+    require(resumeAction(false, true, false, false) == NIVALO_CLI_CLAIM_CONNECT_WIFI,
+            "recovery did not reconnect Wi-Fi");
+    require(resumeAction(false, true, true, false) == NIVALO_CLI_CLAIM_SYNC_TIME,
+            "recovery bypassed clock synchronization");
+    require(resumeAction(false, true, true, true) == NIVALO_CLI_CLAIM_READY,
+            "validated recovery did not become ready");
 
     const std::string uuid = "00000000-0000-4000-8000-000000000000";
     require(isCanonicalUuid(uuid.c_str(), uuid.size()), "canonical UUID rejected");
