@@ -65,9 +65,15 @@ jobs:
         run: python tests/validate_registry_release.py
       - name: Validate runtime provisioning
         run: python tests/validate_provisioning.py
+      - name: Test browser-flash artifact tooling
+        run: python -m unittest discover -s tests -p 'test_browser_flash_artifact.py'
       - name: Install PlatformIO
         run: python -m pip install --disable-pip-version-check platformio==6.1.19
       - name: Build standalone example
         run: pio run --project-dir examples/Esp32Only
+      - name: Build and inspect original-ESP32 browser provisioning artifact
+        run: |
+          pio run --project-dir examples/Esp32Only --environment featheresp32-browser-provisioning
+          python tests/validate_browser_flash_artifact.py
       - name: Build ESP32-STM32 bridge example
         run: pio run --project-dir examples/Esp32Stm32Bridge
