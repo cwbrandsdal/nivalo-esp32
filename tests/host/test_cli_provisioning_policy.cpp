@@ -41,6 +41,13 @@ int main()
     const std::string oversizedWifiPassword(64U, 'x');
     require(!isWifiPassword(oversizedWifiPassword.c_str(), oversizedWifiPassword.size()), "oversized Wi-Fi password accepted");
 
+    require(isHardwareId("esp32-abcdef123456", 18U), "valid hardware ID rejected");
+    require(!isHardwareId("esp32-ABCDEF123456", 18U), "noncanonical hardware ID accepted");
+    require(!isHardwareId("esp32-abcdef12345", 17U), "short hardware ID accepted");
+    require(isClaimCode("ABCD2345", 8U), "valid claim code rejected");
+    require(!isClaimCode("ABCI2345", 8U), "ambiguous claim code accepted");
+    require(!isClaimCode("ABCD234", 7U), "short claim code accepted");
+
     const std::string host = "mqtt-staging.nivalo.io";
     require(isMqttHost(host.c_str(), host.size()), "valid MQTT host rejected");
     require(!isMqttHost("mqtt/path", 9U), "MQTT host path accepted");

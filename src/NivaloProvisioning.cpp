@@ -35,11 +35,33 @@ static bool isCanonicalUuid(const String &value)
     return true;
 }
 
+static bool isSha256Hex(const String &value)
+{
+    if (value.length() != 64U) return false;
+    for (size_t index = 0U; index < value.length(); ++index)
+        if (!((value[index] >= '0' && value[index] <= '9') ||
+              (value[index] >= 'a' && value[index] <= 'f'))) return false;
+    return true;
+}
+
+static bool sha256Hex(const String &value, String &output)
+{
+    uint8_t hash[32];
+    if (mbedtls_sha256_ret(reinterpret_cast<const unsigned char *>(value.c_str()), value.length(), hash, 0) != 0)
+        return false;
+    char encoded[65];
+    for (size_t index = 0U; index < sizeof(hash); ++index)
+        snprintf(encoded + index * 2U, 3U, "%02x", hash[index]);
+    encoded[64] = '\0';
+    output = encoded;
+    return true;
+}
+
 bool NivaloRuntimeCredentials::valid() const
 {
     return wifiSsid.length() > 0U && deviceId.length() > 0U && mqttHost.length() > 0U &&
            (mqttPort == 8883U || mqttPort == 8884U) && mqttClientId.length() > 0U && mqttUsername.length() > 0U &&
-           mqttPassword.length() >= 16U;
+           mqttPassword.length() >= 16U && (claimCodeSha256.length() == 0U || isSha256Hex(claimCodeSha256));
 }
 bool NivaloPendingClaimAttempt::valid() const
 {
@@ -56,6 +78,7 @@ static String serializeCredentials(const NivaloRuntimeCredentials &c)
     doc["mqttClientId"] = c.mqttClientId; doc["mqttUsername"] = c.mqttUsername;
     doc["mqttPassword"] = c.mqttPassword; doc["mqttCaCertificate"] = c.mqttCaCertificate;
     doc["devicePrivateKeyPem"] = c.devicePrivateKeyPem;
+    if (c.claimCodeSha256.length() > 0U) doc["claimCodeSha256"] = c.claimCodeSha256;
     String output; serializeJson(doc, output); return output;
 }
 
@@ -71,6 +94,7 @@ static bool parseCredentials(const String &json, NivaloRuntimeCredentials &c)
     c.mqttClientId = doc["mqttClientId"] | ""; c.mqttUsername = doc["mqttUsername"] | "";
     c.mqttPassword = doc["mqttPassword"] | ""; c.mqttCaCertificate = doc["mqttCaCertificate"] | "";
     c.devicePrivateKeyPem = doc["devicePrivateKeyPem"] | "";
+    c.claimCodeSha256 = doc["claimCodeSha256"] | "";
     return c.valid();
 }
 
@@ -252,6 +276,7 @@ void NivaloProvisioning::continueAfterTimeSync()
         _pending.mqttUsername = _credentials.mqttUsername; _pending.mqttPassword = _credentials.mqttPassword;
         _pending.mqttCaCertificate = _credentials.mqttCaCertificate;
         _pending.devicePrivateKeyPem = _credentials.devicePrivateKeyPem;
+        _pending.claimCodeSha256 = _credentials.claimCodeSha256;
         if (verifyExistingIdentity() && _store.commit(_pending))
         {
             _credentials = _pending; _state = NIVALO_PROVISIONING_READY;
@@ -329,6 +354,7 @@ void NivaloProvisioning::loop()
         if (exchangeClaim() && verifyExistingIdentity() && _store.commit(_pending))
         {
             _credentials = _pending; _pendingClaimCode = ""; _store.clearPending(); _claimAttempt=NivaloPendingClaimAttempt(); _state = NIVALO_PROVISIONING_READY;
+            sendCliClaimResponse(true);
         }
         else if (++_claimFailures >= 5U) { startPortal(); }
         else { _claimRetryAt=millis()+min(60000UL,5000UL*(1UL<<(_claimFailures-1U))); }
@@ -404,6 +430,11 @@ void NivaloProvisioning::handleCliLine(char *line, size_t length)
         sendCliResponse("nivalo.cli.provision.v1", requestId, ok);
         if (ok) _cliRestartAt = millis() + 500UL;
     }
+    else if (schema == "nivalo.cli.claim.v1")
+    {
+        if (!handleCliClaim(root, requestId))
+            sendCliResponse("nivalo.cli.claim.v1", requestId, false);
+    }
 }
 
 bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &requestId)
@@ -452,6 +483,59 @@ bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &reque
     _pending = NivaloRuntimeCredentials();
     _claimAttempt = NivaloPendingClaimAttempt();
     _pendingClaimCode = "";
+    return true;
+}
+
+bool NivaloProvisioning::handleCliClaim(JsonObject root, const String &requestId)
+{
+    if (!_cliProvisioningAllowed || _cliClaimRequestId.length() > 0U ||
+        root.size() != 5U || !root["expectedHardwareId"].is<const char *>() ||
+        !root["wifi"].is<JsonObject>() || !root["claim"].is<JsonObject>()) return false;
+    JsonObject wifi = root["wifi"].as<JsonObject>();
+    JsonObject claim = root["claim"].as<JsonObject>();
+    if (wifi.size() != 2U || claim.size() != 1U ||
+        !wifi["ssid"].is<const char *>() || !wifi["password"].is<const char *>() ||
+        !claim["code"].is<const char *>()) return false;
+
+    const String expectedHardwareId = root["expectedHardwareId"].as<String>();
+    const String wifiSsid = wifi["ssid"].as<String>();
+    const String wifiPassword = wifi["password"].as<String>();
+    String claimCode = claim["code"].as<String>();
+    claimCode.toUpperCase();
+    if (!NivaloCliProvisioningPolicy::isHardwareId(expectedHardwareId.c_str(), expectedHardwareId.length()) ||
+        expectedHardwareId != hardwareId() ||
+        !NivaloCliProvisioningPolicy::isWifiSsid(wifiSsid.c_str(), wifiSsid.length()) ||
+        !NivaloCliProvisioningPolicy::isWifiPassword(wifiPassword.c_str(), wifiPassword.length()) ||
+        !NivaloCliProvisioningPolicy::isClaimCode(claimCode.c_str(), claimCode.length())) return false;
+
+    String claimCodeSha256;
+    if (!sha256Hex(claimCode, claimCodeSha256)) return false;
+    if (_credentials.valid())
+    {
+        if (_credentials.claimCodeSha256 != claimCodeSha256) return false;
+        _cliClaimRequestId = requestId;
+        sendCliClaimResponse(true);
+        return true;
+    }
+
+    const bool reusePendingAttempt = _claimAttempt.valid() && claimCode == _claimAttempt.claimCode;
+    if (reusePendingAttempt)
+    {
+        _claimAttempt.wifiSsid = wifiSsid;
+        _claimAttempt.wifiPassword = wifiPassword;
+    }
+    else if (!createPendingAttempt(claimCode, wifiSsid, wifiPassword)) return false;
+    if (!_store.savePending(_claimAttempt)) return false;
+
+    _pending = NivaloRuntimeCredentials();
+    _pending.wifiSsid = wifiSsid;
+    _pending.wifiPassword = wifiPassword;
+    _pendingClaimCode = claimCode;
+    _claimFailures = 0U;
+    _claimRetryAt = 0U;
+    _changingWifiOnly = false;
+    _cliClaimRequestId = requestId;
+    startWifi(wifiSsid, wifiPassword);
     return true;
 }
 
@@ -510,8 +594,32 @@ void NivaloProvisioning::sendCliResponse(const char *schema, const String &reque
     _cliSerial->write('\n');
 }
 
+void NivaloProvisioning::sendCliClaimResponse(bool ok)
+{
+    if (_cliClaimRequestId.length() == 0U) return;
+    if (_cliSerial == NULL)
+    {
+        _cliClaimRequestId = "";
+        return;
+    }
+    StaticJsonDocument<384> response;
+    response["schema"] = "nivalo.cli.claim.v1";
+    response["requestId"] = _cliClaimRequestId;
+    response["ok"] = ok;
+    if (ok)
+    {
+        response["hardwareId"] = hardwareId();
+        response["deviceId"] = _credentials.deviceId;
+    }
+    serializeJson(response, *_cliSerial);
+    _cliSerial->write('\n');
+    _cliSerial->flush();
+    _cliClaimRequestId = "";
+}
+
 void NivaloProvisioning::startPortal()
 {
+    sendCliClaimResponse(false);
     WiFi.disconnect(false, false); WiFi.mode(WIFI_AP);
     String ap = String(_config.softApPrefix) + "-" + hardwareId().substring(hardwareId().length() - 6U);
     WiFi.softAP(ap.c_str()); _dns.start(53, "*", WiFi.softAPIP());
@@ -641,6 +749,7 @@ bool NivaloProvisioning::exchangeClaim()
     _pending.mqttClientId=doc["mqtt"]["clientId"]|""; _pending.mqttUsername=doc["mqtt"]["username"]|"";
     _pending.mqttPassword=_claimAttempt.mqttCredential; _pending.mqttCaCertificate=doc["mqtt"]["caCertificatePem"]|"";
     _pending.devicePrivateKeyPem=_claimAttempt.privateKeyPem;
+    if (!sha256Hex(_claimAttempt.claimCode, _pending.claimCodeSha256)) { _lastError="Claim receipt hash failed"; return false; }
     if (!_pending.valid() || _pending.deviceId.length() != 36U) { _lastError="Claim response identity invalid"; return false; } return true;
 }
 

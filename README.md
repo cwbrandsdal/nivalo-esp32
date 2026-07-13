@@ -115,6 +115,16 @@ Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
 output:
 
 - `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
+- `nivalo.cli.claim.v1` accepts Wi-Fi plus a one-use code only when its
+  `expectedHardwareId` exactly matches the same USB-connected ESP32. The device
+  creates and durably stages its P-256 proof/MQTT credential, performs the
+  certificate-validating HTTPS exchange and MQTT TLS verification itself,
+  atomically promotes the identity, then returns only `hardwareId` and
+  `deviceId` in the terminal acknowledgement. Claim proof keys and MQTT
+  credentials never cross the serial boundary. The active credential record
+  retains only the claim code's SHA-256 receipt, so retrying the same code after
+  a reset, USB loss, or missed acknowledgement returns the already-committed
+  identity without repeating the cloud claim; a different code is rejected;
 - `nivalo.cli.provision.v1` accepts one exact Wi-Fi object and seven-field MQTT
   TLS identity matching `tests/cli_provision_request_v1.json`, writes a
   durable recovery stage, commits to the inactive Preferences slot, verifies

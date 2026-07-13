@@ -1,0 +1,12 @@
+{
+  "schema": "nivalo.cli.claim.v1",
+  "requestId": "0123456789abcdef0123456789abcdef",
+  "expectedHardwareId": "esp32-abcdef123456",
+  "wifi": {
+    "ssid": "bench-network",
+    "password": "wifi-passphrase"
+  },
+  "claim": {
+    "code": "ABCD2345"
+  }
+}

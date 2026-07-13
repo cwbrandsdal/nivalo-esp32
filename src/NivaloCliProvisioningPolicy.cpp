@@ -1,5 +1,7 @@
 #include "NivaloCliProvisioningPolicy.h"
 
+#include <string.h>
+
 namespace
 {
 bool isHex(char value)
@@ -54,6 +56,24 @@ bool isWifiPassword(const char *value, size_t length)
 {
     return (length == 0U || (length >= 8U && length <= 63U)) &&
            !containsControl(value, length);
+}
+
+bool isHardwareId(const char *value, size_t length)
+{
+    if (value == NULL || length != 18U || strncmp(value, "esp32-", 6U) != 0) return false;
+    for (size_t index = 6U; index < length; ++index)
+        if (!((value[index] >= '0' && value[index] <= '9') ||
+              (value[index] >= 'a' && value[index] <= 'f'))) return false;
+    return true;
+}
+
+bool isClaimCode(const char *value, size_t length)
+{
+    static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+    if (value == NULL || length != 8U) return false;
+    for (size_t index = 0U; index < length; ++index)
+        if (strchr(alphabet, value[index]) == NULL) return false;
+    return true;
 }
 
 bool isMqttHost(const char *value, size_t length)
