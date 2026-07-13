@@ -158,6 +158,29 @@ credential verification, and password-free response contract. That platform
 change still requires staging deployment and end-to-end acceptance with an
 encrypted physical board before the claim flow can be described as live.
 
+The CLI request fixture is also bound to an immutable `nivalo-platform` commit
+by `tests/serial_claim_contract_pin.json`. CI runs the offline, deterministic
+check below; it needs no cross-repository credential or network request:
+
+```powershell
+python tests/validate_serial_claim_contract.py
+```
+
+When intentionally advancing the platform contract, compare the ESP32 fixture
+directly with the file at the pinned platform commit before updating the pin:
+
+```powershell
+python tests/validate_serial_claim_contract.py `
+  --platform-repository ..\nivalo-platform
+```
+
+The optional command reads the pinned object with `git show`, so it neither
+depends on nor changes the platform worktree's current branch. The platform
+repository is private today; do not add an unauthenticated CI checkout or copy
+a credential into this repository. A future live cross-repository checkout
+must use a separate read-only deploy identity. The immutable pin remains the CI
+authority until such an identity is provisioned.
+
 MQTT uses certificate-validating TLS on production port `8883` or the isolated
 staging port `8884`; no other provisioned broker port is accepted. Configure new
 sketches through `NivaloMqttConfig`; the original positional `beginMqtt`
