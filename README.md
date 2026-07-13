@@ -111,7 +111,8 @@ Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
 output:
 
 - `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
-- `nivalo.cli.provision.v1` accepts one exact Wi-Fi/MQTT TLS identity, writes a
+- `nivalo.cli.provision.v1` accepts one exact Wi-Fi object and seven-field MQTT
+  TLS identity matching `tests/cli_provision_request_v1.json`, writes a
   durable recovery stage, commits to the inactive Preferences slot, verifies
   both the slot and active selector, replaces any older claim with a verified
   non-secret tombstone, clears the stage, and only then acknowledges and restarts;

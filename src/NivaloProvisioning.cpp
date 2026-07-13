@@ -413,7 +413,7 @@ bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &reque
         !root["wifi"].is<JsonObject>() || !root["mqtt"].is<JsonObject>()) return false;
     JsonObject wifi = root["wifi"].as<JsonObject>();
     JsonObject mqtt = root["mqtt"].as<JsonObject>();
-    if (wifi.size() != 2U || mqtt.size() != 8U ||
+    if (wifi.size() != 2U || mqtt.size() != 7U ||
         !wifi["ssid"].is<const char *>() || !wifi["password"].is<const char *>() ||
         !mqtt["deviceId"].is<const char *>() || !mqtt["host"].is<const char *>() ||
         !mqtt["port"].is<unsigned int>() || !mqtt["useTls"].is<bool>() ||

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 
@@ -15,7 +16,7 @@ def main() -> None:
     assert 'schema == "nivalo.cli.identify.v1"' in source
     assert 'schema == "nivalo.cli.provision.v1"' in source
     assert "root.size() != 4U" in source
-    assert "wifi.size() != 2U || mqtt.size() != 8U" in source
+    assert "wifi.size() != 2U || mqtt.size() != 7U" in source
     assert 'mqtt["useTls"].as<bool>() != true' in source
     assert "isTlsPort" in source and "port == 8883U || port == 8884U" in policy
     assert "finishCliProvisioning(replacement, true)" in source
@@ -57,6 +58,14 @@ def main() -> None:
     for value in forbidden:
         assert value not in source
     assert "serializeJson(response, *_cliSerial)" in source
+
+    fixture = json.loads((ROOT / "tests/cli_provision_request_v1.json").read_text())
+    assert set(fixture) == {"schema", "requestId", "wifi", "mqtt"}
+    assert set(fixture["wifi"]) == {"ssid", "password"}
+    assert set(fixture["mqtt"]) == {
+        "deviceId", "host", "port", "useTls", "clientId", "username", "password"
+    }
+    assert len(fixture["mqtt"]) == 7
 
     print("validated bounded CLI NDJSON, strict credential policy, encrypted atomic commit, and non-secret responses")
 
