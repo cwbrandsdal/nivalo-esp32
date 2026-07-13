@@ -1,0 +1,17 @@
+{
+  "schema": "nivalo.cli.provision.v1",
+  "requestId": "0123456789abcdef0123456789abcdef",
+  "wifi": {
+    "ssid": "bench-network",
+    "password": "wifi-passphrase"
+  },
+  "mqtt": {
+    "deviceId": "11111111-2222-4333-8444-555555555555",
+    "host": "mqtt-staging.nivalo.io",
+    "port": 8884,
+    "useTls": true,
+    "clientId": "device-11111111-2222-4333-8444-555555555555",
+    "username": "device-11111111-2222-4333-8444-555555555555",
+    "password": "fixture-only-not-a-secret"
+  }
+}

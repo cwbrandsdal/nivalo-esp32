@@ -2,9 +2,14 @@
 #define NIVALO_PROVISIONING_H
 
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
+
+#include "NivaloCliProvisioningPolicy.h"
+#include "NivaloCliFrame.h"
+#include "NivaloCliTransaction.h"
 
 struct NivaloRuntimeCredentials
 {
@@ -26,6 +31,7 @@ enum NivaloProvisioningState
 {
     NIVALO_PROVISIONING_STARTING,
     NIVALO_PROVISIONING_CONNECTING_WIFI,
+    NIVALO_PROVISIONING_SYNCING_TIME,
     NIVALO_PROVISIONING_SETUP_PORTAL,
     NIVALO_PROVISIONING_CLAIMING,
     NIVALO_PROVISIONING_READY,
@@ -42,8 +48,17 @@ struct NivaloProvisioningConfig
     bool setupButtonActiveLow = true;
     unsigned long setupButtonHoldMs = 3000UL;
     unsigned long wifiConnectTimeoutMs = 20000UL;
+    const char *primaryNtpServer = "pool.ntp.org";
+    const char *secondaryNtpServer = "time.cloudflare.com";
+    unsigned long timeSyncTimeoutMs = 15000UL;
+    unsigned long timeSyncRetryBaseMs = 2000UL;
+    unsigned long timeSyncRetryMaximumMs = 30000UL;
+    unsigned long minimumValidEpochSeconds = 1704067200UL;
+    uint8_t timeSyncMaximumAttempts = 3U;
     bool allowUnencryptedNvsForLocalDevelopment = false;
     const NivaloRuntimeCredentials *localDeveloperFixture = NULL;
+    bool enableCliSerial = true;
+    Stream *cliSerial = NULL;
 };
 
 class NivaloProvisioningStore
@@ -55,6 +70,9 @@ public:
     bool loadPending(NivaloPendingClaimAttempt &attempt);
     bool savePending(const NivaloPendingClaimAttempt &attempt);
     bool clearPending();
+    bool loadCliStaged(NivaloRuntimeCredentials &credentials);
+    bool stageCli(const NivaloRuntimeCredentials &credentials);
+    bool clearCliStaged();
     bool clear();
     bool storageProtected() const;
 private:
@@ -67,6 +85,9 @@ class NivaloProvisioning
 {
 public:
     NivaloProvisioning();
+    ~NivaloProvisioning();
+    NivaloProvisioning(const NivaloProvisioning &) = delete;
+    NivaloProvisioning &operator=(const NivaloProvisioning &) = delete;
     bool begin(const NivaloProvisioningConfig &config);
     void loop();
     void enterSetupMode();
@@ -77,7 +98,16 @@ public:
     const char *lastError() const { return _lastError.c_str(); }
 
 private:
+    void handleCliSerial();
+    void handleCliLine(char *line, size_t length);
+    bool handleCliProvision(JsonObject root, const String &requestId);
+    bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
+    void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
+    void resetCliFrame();
     void startWifi(const String &ssid, const String &password);
+    void startTimeSync(bool resetAttempts);
+    void continueAfterTimeSync();
+    bool clockPermitsTls() const;
     void startPortal();
     void stopPortal();
     void handlePortalRoot();
@@ -101,10 +131,20 @@ private:
     unsigned long _stateStartedAt = 0U;
     unsigned long _buttonPressedAt = 0U;
     unsigned long _wifiLostAt = 0U;
+    uint8_t _timeSyncFailures = 0U;
+    unsigned long _timeSyncRetryAt = 0U;
+    bool _timeSyncWaitingToRetry = false;
     String _pendingClaimCode;
     uint8_t _claimFailures = 0U;
     unsigned long _claimRetryAt = 0U;
     String _lastError;
+    Stream *_cliSerial = NULL;
+    char *_cliLine = NULL;
+    NivaloCliFrame _cliFrame = NivaloCliFrame(
+        NivaloCliProvisioningPolicy::MaximumLineLength,
+        NivaloCliProvisioningPolicy::FrameTimeoutMs);
+    unsigned long _cliRestartAt = 0U;
+    bool _cliProvisioningAllowed = false;
 };
 
 #endif

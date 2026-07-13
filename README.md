@@ -70,9 +70,11 @@ compatibility shim.
 `NivaloProvisioning` removes compiled production Wi-Fi and MQTT credentials.
 On first boot it starts a `Nivalo-Setup-xxxxxx` SoftAP, wildcard DNS captive
 portal, and non-blocking web server. The user submits Wi-Fi plus an eight-character
-one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Before its first
-HTTPS request, the device generates an ECDSA P-256 proof key and a 32-byte MQTT
-credential and persists the entire pending attempt in encrypted Preferences.
+one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Once connected,
+provisioning starts SNTP and waits for a valid UTC clock using bounded attempts
+with backoff; claim HTTPS and MQTT identity validation fail closed until then.
+Before its first HTTPS request, the device generates an ECDSA P-256 proof key
+and a 32-byte MQTT credential and persists the entire pending attempt in encrypted Preferences.
 The request uses certificate-validating HTTPS and redirects are disabled. Claim codes,
 passwords, response bodies, and signatures are never printed.
 
@@ -101,14 +103,46 @@ flash encryption is absent. Local boards may opt in with
 compiled developer fixtures exist only inside
 `NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE`, which defaults to `0`.
 
+### CLI serial provisioning
+
+`NivaloProvisioning` also owns the versioned USB/UART boundary used by the
+Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
+`NivaloProvisioningConfig::cliSerial`) without coupling requests to diagnostic
+output:
+
+- `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
+- `nivalo.cli.provision.v1` accepts one exact Wi-Fi object and seven-field MQTT
+  TLS identity matching `tests/cli_provision_request_v1.json`, writes a
+  durable recovery stage, commits to the inactive Preferences slot, verifies
+  both the slot and active selector, replaces any older claim with a verified
+  non-secret tombstone, clears the stage, and only then acknowledges and restarts;
+- input is NDJSON bounded to 16 KiB, 256 bytes of work per loop, and a five-second
+  frame lifetime; partial, malformed, oversized, extra-field, and unsupported
+  requests fail closed;
+- provisioning accepts only TLS ports `8883`/`8884`, a canonical device UUID,
+  bounded identities, and an open or valid WPA passphrase. The request and all
+credential values are wiped from the line buffer and never echoed or logged.
+
+Boot recovery completes a durable CLI stage before it considers a prior captive-
+portal claim. A reset or write failure at any transaction boundary therefore
+leaves a retryable stage and cannot acknowledge an identity that the next boot
+would silently replace.
+
+Serial identification remains available when storage is unavailable, but serial
+provisioning is rejected unless flash/NVS encryption is active or the existing
+explicit local-development exception is enabled. A compiled local developer
+fixture also disables serial provisioning because it would otherwise mask the
+committed identity after restart. Set `enableCliSerial` to `false` for products
+that do not expose this physical provisioning surface.
+
 The claim wire contract is published in `nivalo-protocol/specs/device-claim-v1.md`.
-The remaining backend/console work is deliberately not implemented here: create
-and display organization-scoped codes, expire within ten minutes, atomically
-consume once, lock after five failures, rate-limit by code/IP/hardware ID, reject
-nonce replay/concurrent consumption, make exact retries idempotent while rejecting
-mismatched replay, verify the canonical proof, enforce audited hardware transfers,
-store only a one-way verifier for the device-generated MQTT credential, and return the
-claim response schema without any reusable claim secret.
+The platform backend and console implement the matching organization-scoped
+code issuance, QR/countdown display, bounded expiry and failure lockout,
+code/IP/hardware rate limits, serializable one-use consumption, proof and replay
+validation, audited hardware transfer, idempotent exact retry, one-way MQTT
+credential verification, and password-free response contract. That platform
+change still requires staging deployment and end-to-end acceptance with an
+encrypted physical board before the claim flow can be described as live.
 
 MQTT uses certificate-validating TLS on production port `8883` or the isolated
 staging port `8884`; no other provisioned broker port is accepted. Configure new

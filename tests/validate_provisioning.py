@@ -66,6 +66,25 @@ def main():
     assert "while (WiFi.status()" not in source
     assert "verifyExistingIdentity() && _store.commit(_pending)" in source and "mqtt.setSocketTimeout(3)" in source
     assert "wifiConnectTimeoutMs = 20000UL" in header and "setupButtonHoldMs = 3000UL" in header
+    assert "NIVALO_PROVISIONING_SYNCING_TIME" in header
+    assert 'primaryNtpServer = "pool.ntp.org"' in header
+    assert "timeSyncTimeoutMs = 15000UL" in header and "timeSyncMaximumAttempts = 3U" in header
+    connecting_start = source.index("if (_state == NIVALO_PROVISIONING_CONNECTING_WIFI)")
+    syncing_start = source.index("else if (_state == NIVALO_PROVISIONING_SYNCING_TIME)", connecting_start)
+    claiming_start = source.index("else if (_state == NIVALO_PROVISIONING_CLAIMING)", syncing_start)
+    connecting_branch = source[connecting_start:syncing_start]
+    syncing_branch = source[syncing_start:claiming_start]
+    assert "startTimeSync(true)" in connecting_branch
+    assert "exchangeClaim" not in connecting_branch and "verifyExistingIdentity" not in connecting_branch
+    assert "clockPermitsTls()" in syncing_branch and "continueAfterTimeSync()" in syncing_branch
+    assert "exchangeClaim" not in syncing_branch and "verifyExistingIdentity" not in syncing_branch
+    assert "timeSyncWaitingToRetry" in syncing_branch and "mayRetry" in syncing_branch and "startTimeSync(false)" in syncing_branch
+    exchange_start = source.index("bool NivaloProvisioning::exchangeClaim()")
+    exchange_http = source.index("HTTPClient http", exchange_start)
+    assert source.index("if (!clockPermitsTls())", exchange_start) < exchange_http
+    verify_start = source.index("bool NivaloProvisioning::verifyExistingIdentity()")
+    verify_socket = source.index("WiFiClientSecure tls", verify_start)
+    assert source.index("if (!clockPermitsTls())", verify_start) < verify_socket
     for rel in ("examples/Esp32Only","examples/Esp32Stm32Bridge"):
         main_source=(ROOT/rel/"src/main.cpp").read_text(); cfg=(ROOT/rel/"include/nivalo_config.example.h").read_text()
         assert "NivaloProvisioning provisioning" in main_source and "provisioning.loop()" in main_source
