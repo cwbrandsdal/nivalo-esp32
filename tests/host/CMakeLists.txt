@@ -59,3 +59,15 @@ else()
 endif()
 
 add_test(NAME nivalo_cli_transaction_tests COMMAND nivalo_cli_transaction_tests)
+
+add_executable(nivalo_provisioning_time_policy_tests test_provisioning_time_policy.cpp)
+target_include_directories(nivalo_provisioning_time_policy_tests PRIVATE ../../src)
+target_compile_features(nivalo_provisioning_time_policy_tests PRIVATE cxx_std_11)
+
+if(MSVC)
+    target_compile_options(nivalo_provisioning_time_policy_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(nivalo_provisioning_time_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+endif()
+
+add_test(NAME nivalo_provisioning_time_policy_tests COMMAND nivalo_provisioning_time_policy_tests)

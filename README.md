@@ -70,9 +70,11 @@ compatibility shim.
 `NivaloProvisioning` removes compiled production Wi-Fi and MQTT credentials.
 On first boot it starts a `Nivalo-Setup-xxxxxx` SoftAP, wildcard DNS captive
 portal, and non-blocking web server. The user submits Wi-Fi plus an eight-character
-one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Before its first
-HTTPS request, the device generates an ECDSA P-256 proof key and a 32-byte MQTT
-credential and persists the entire pending attempt in encrypted Preferences.
+one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Once connected,
+provisioning starts SNTP and waits for a valid UTC clock using bounded attempts
+with backoff; claim HTTPS and MQTT identity validation fail closed until then.
+Before its first HTTPS request, the device generates an ECDSA P-256 proof key
+and a 32-byte MQTT credential and persists the entire pending attempt in encrypted Preferences.
 The request uses certificate-validating HTTPS and redirects are disabled. Claim codes,
 passwords, response bodies, and signatures are never printed.
 

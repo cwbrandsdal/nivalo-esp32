@@ -1,5 +1,6 @@
 #include "NivaloProvisioning.h"
 #include "NivaloConnection.h"
+#include "NivaloProvisioningTimePolicy.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -17,6 +18,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include <new>
+#include <time.h>
 
 
 static bool isCanonicalUuid(const String &value)
@@ -220,6 +222,49 @@ void NivaloProvisioning::startWifi(const String &ssid, const String &password)
 {
     stopPortal(); WiFi.mode(WIFI_STA); WiFi.begin(ssid.c_str(), password.c_str());
     _state = NIVALO_PROVISIONING_CONNECTING_WIFI; _stateStartedAt = millis();
+    _wifiLostAt = 0U; _timeSyncFailures = 0U; _timeSyncRetryAt = 0U;
+    _timeSyncWaitingToRetry = false;
+}
+
+bool NivaloProvisioning::clockPermitsTls() const
+{
+    return NivaloProvisioningTimePolicy::permitsTls(
+        static_cast<int64_t>(time(NULL)),
+        static_cast<uint64_t>(_config.minimumValidEpochSeconds));
+}
+
+void NivaloProvisioning::startTimeSync(bool resetAttempts)
+{
+    if (resetAttempts) _timeSyncFailures = 0U;
+    _timeSyncRetryAt = 0U;
+    _timeSyncWaitingToRetry = false;
+    configTime(0, 0, _config.primaryNtpServer, _config.secondaryNtpServer);
+    _state = NIVALO_PROVISIONING_SYNCING_TIME;
+    _stateStartedAt = millis();
+}
+
+void NivaloProvisioning::continueAfterTimeSync()
+{
+    if (_changingWifiOnly)
+    {
+        _pending.deviceId = _credentials.deviceId; _pending.mqttHost = _credentials.mqttHost;
+        _pending.mqttPort = _credentials.mqttPort; _pending.mqttClientId = _credentials.mqttClientId;
+        _pending.mqttUsername = _credentials.mqttUsername; _pending.mqttPassword = _credentials.mqttPassword;
+        _pending.mqttCaCertificate = _credentials.mqttCaCertificate;
+        _pending.devicePrivateKeyPem = _credentials.devicePrivateKeyPem;
+        if (verifyExistingIdentity() && _store.commit(_pending))
+        {
+            _credentials = _pending; _state = NIVALO_PROVISIONING_READY;
+        }
+        else
+        {
+            _lastError = "New Wi-Fi could not validate the existing MQTT TLS identity";
+            startPortal();
+        }
+    }
+    else if (_pendingClaimCode.length() > 0U) _state = NIVALO_PROVISIONING_CLAIMING;
+    else _state = NIVALO_PROVISIONING_READY;
+    _stateStartedAt = millis();
 }
 
 void NivaloProvisioning::loop()
@@ -237,28 +282,46 @@ void NivaloProvisioning::loop()
     {
         if (WiFi.status() == WL_CONNECTED)
         {
-            if (_changingWifiOnly)
-            {
-                _pending.deviceId = _credentials.deviceId; _pending.mqttHost = _credentials.mqttHost;
-                _pending.mqttPort = _credentials.mqttPort; _pending.mqttClientId = _credentials.mqttClientId;
-                _pending.mqttUsername = _credentials.mqttUsername; _pending.mqttPassword = _credentials.mqttPassword;
-                _pending.mqttCaCertificate = _credentials.mqttCaCertificate;
-                _pending.devicePrivateKeyPem = _credentials.devicePrivateKeyPem;
-                if (verifyExistingIdentity() && _store.commit(_pending))
-                {
-                    _credentials = _pending; _state = NIVALO_PROVISIONING_READY;
-                }
-                else
-                {
-                    _lastError = "New Wi-Fi could not validate the existing MQTT TLS identity";
-                    startPortal();
-                }
-            }
-            else if (_pendingClaimCode.length() > 0U) _state = NIVALO_PROVISIONING_CLAIMING;
-            else _state = NIVALO_PROVISIONING_READY;
-            _stateStartedAt = millis();
+            startTimeSync(true);
         }
         else if (millis() - _stateStartedAt >= _config.wifiConnectTimeoutMs) startPortal();
+    }
+    else if (_state == NIVALO_PROVISIONING_SYNCING_TIME)
+    {
+        const unsigned long now = millis();
+        if (WiFi.status() != WL_CONNECTED)
+        {
+            if (_wifiLostAt == 0U) _wifiLostAt = now;
+            else if (NivaloProvisioningTimePolicy::elapsed(now, _wifiLostAt, _config.wifiConnectTimeoutMs))
+                startPortal();
+            return;
+        }
+        _wifiLostAt = 0U;
+        if (clockPermitsTls())
+        {
+            continueAfterTimeSync();
+        }
+        else if (_timeSyncWaitingToRetry)
+        {
+            if (NivaloProvisioningTimePolicy::retryDue(now, _timeSyncRetryAt)) startTimeSync(false);
+        }
+        else if (NivaloProvisioningTimePolicy::elapsed(now, _stateStartedAt, _config.timeSyncTimeoutMs))
+        {
+            ++_timeSyncFailures;
+            if (!NivaloProvisioningTimePolicy::mayRetry(_timeSyncFailures, _config.timeSyncMaximumAttempts))
+            {
+                _lastError = "Clock synchronization timed out; TLS was not attempted";
+                startPortal();
+            }
+            else
+            {
+                _timeSyncRetryAt = now + NivaloProvisioningTimePolicy::retryDelay(
+                    _timeSyncFailures,
+                    _config.timeSyncRetryBaseMs,
+                    _config.timeSyncRetryMaximumMs);
+                _timeSyncWaitingToRetry = true;
+            }
+        }
     }
     else if (_state == NIVALO_PROVISIONING_CLAIMING)
     {
@@ -548,6 +611,7 @@ bool NivaloProvisioning::createPendingAttempt(const String &claimCode, const Str
 
 bool NivaloProvisioning::exchangeClaim()
 {
+    if (!clockPermitsTls()) { _lastError="Clock is not synchronized; claim HTTPS was not attempted"; return false; }
     if (_config.claimUrl == NULL || strncmp(_config.claimUrl, "https://", 8) != 0 || !_claimAttempt.valid()) { _lastError="Pending claim is invalid"; return false; }
     DynamicJsonDocument request(3072); request["attemptId"]=_claimAttempt.attemptId; request["claimCode"]=_claimAttempt.claimCode;
     request["mqttCredential"]=_claimAttempt.mqttCredential; request["hardware"]["hardwareId"]=hardwareId();
@@ -582,6 +646,7 @@ bool NivaloProvisioning::exchangeClaim()
 
 bool NivaloProvisioning::verifyExistingIdentity()
 {
+    if (!clockPermitsTls()) { _lastError="Clock is not synchronized; MQTT TLS was not attempted"; return false; }
     WiFiClientSecure tls;
     tls.setCACert(_pending.mqttCaCertificate.length() > 0U ? _pending.mqttCaCertificate.c_str() : NivaloConnection::defaultCaCertificate());
     PubSubClient mqtt(tls);
