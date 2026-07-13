@@ -15,6 +15,7 @@ def main() -> None:
 
     assert 'schema == "nivalo.cli.identify.v1"' in source
     assert 'schema == "nivalo.cli.provision.v1"' in source
+    assert 'schema == "nivalo.cli.claim.v1"' in source
     assert "root.size() != 4U" in source
     assert "wifi.size() != 2U || mqtt.size() != 7U" in source
     assert 'mqtt["useTls"].as<bool>() != true' in source
@@ -67,7 +68,30 @@ def main() -> None:
     }
     assert len(fixture["mqtt"]) == 7
 
-    print("validated bounded CLI NDJSON, strict credential policy, encrypted atomic commit, and non-secret responses")
+    claim_fixture = json.loads((ROOT / "tests/cli_claim_request_v1.json").read_text())
+    assert set(claim_fixture) == {"schema", "requestId", "expectedHardwareId", "wifi", "claim"}
+    assert set(claim_fixture["wifi"]) == {"ssid", "password"}
+    assert set(claim_fixture["claim"]) == {"code"}
+    assert 'expectedHardwareId != hardwareId()' in source
+    assert "isHardwareId" in policy and "isClaimCode" in policy
+    assert source.index("_store.savePending(_claimAttempt)", source.index("bool NivaloProvisioning::handleCliClaim")) < source.index(
+        "startWifi(wifiSsid, wifiPassword)", source.index("bool NivaloProvisioning::handleCliClaim")
+    )
+    assert 'response["schema"] = "nivalo.cli.claim.v1"' in source
+    assert 'response["hardwareId"] = hardwareId()' in source
+    assert 'response["deviceId"] = _credentials.deviceId' in source
+    assert 'response["claim"]' not in source
+    active_serializer = source[source.index("static String serializeCredentials") : source.index("static const char CliStageTombstone")]
+    assert 'doc["claimCodeSha256"]' in active_serializer
+    assert 'doc["claimCode"]' not in active_serializer
+    claim_handler = source[source.index("bool NivaloProvisioning::handleCliClaim") : source.index("bool NivaloProvisioning::finishCliProvisioning")]
+    assert '_credentials.claimCodeSha256 != claimCodeSha256' in claim_handler
+    assert claim_handler.index('_credentials.claimCodeSha256 != claimCodeSha256') < claim_handler.index('sendCliClaimResponse(true)')
+    assert claim_handler.index('sendCliClaimResponse(true)') < claim_handler.index('createPendingAttempt')
+    assert claim_handler.index('sendCliClaimResponse(true)') < claim_handler.index('startWifi(wifiSsid, wifiPassword)')
+    assert 'sha256Hex(_claimAttempt.claimCode, _pending.claimCodeSha256)' in source
+
+    print("validated bounded CLI NDJSON, serial-bound device claim, encrypted atomic commit, and non-secret responses")
 
 
 if __name__ == "__main__":

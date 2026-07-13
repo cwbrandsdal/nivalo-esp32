@@ -13,6 +13,8 @@ bool isRequestId(const char *value, size_t length);
 bool isCanonicalUuid(const char *value, size_t length);
 bool isWifiSsid(const char *value, size_t length);
 bool isWifiPassword(const char *value, size_t length);
+bool isHardwareId(const char *value, size_t length);
+bool isClaimCode(const char *value, size_t length);
 bool isMqttHost(const char *value, size_t length);
 bool isMqttIdentity(const char *value, size_t length);
 bool isMqttPassword(const char *value, size_t length);

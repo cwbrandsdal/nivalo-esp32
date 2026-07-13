@@ -16,7 +16,7 @@ struct NivaloRuntimeCredentials
     String wifiSsid, wifiPassword;
     String deviceId, mqttHost, mqttClientId, mqttUsername, mqttPassword, mqttCaCertificate;
     uint16_t mqttPort = 8883;
-    String devicePrivateKeyPem;
+    String devicePrivateKeyPem, claimCodeSha256;
     bool valid() const;
 };
 
@@ -101,8 +101,10 @@ private:
     void handleCliSerial();
     void handleCliLine(char *line, size_t length);
     bool handleCliProvision(JsonObject root, const String &requestId);
+    bool handleCliClaim(JsonObject root, const String &requestId);
     bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
     void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
+    void sendCliClaimResponse(bool ok);
     void resetCliFrame();
     void startWifi(const String &ssid, const String &password);
     void startTimeSync(bool resetAttempts);
@@ -138,6 +140,7 @@ private:
     uint8_t _claimFailures = 0U;
     unsigned long _claimRetryAt = 0U;
     String _lastError;
+    String _cliClaimRequestId;
     Stream *_cliSerial = NULL;
     char *_cliLine = NULL;
     NivaloCliFrame _cliFrame = NivaloCliFrame(

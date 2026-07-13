@@ -45,7 +45,7 @@ def main():
     assert "exchangeClaim" not in reconcile_branch
     assert source.index("_store.savePending(_claimAttempt)") < source.index("startWifi(ssid, password)")
     assert "reusePendingAttempt = _claimAttempt.valid() && claim == _claimAttempt.claimCode" in source
-    reuse_start = source.index("if (reusePendingAttempt)")
+    reuse_start = source.index("if (reusePendingAttempt)", source.index("void NivaloProvisioning::handlePortalSubmit"))
     reuse_end = source.index("else if (!createPendingAttempt", reuse_start)
     reuse_branch = source[reuse_start:reuse_end]
     assert "_claimAttempt.wifiSsid = ssid" in reuse_branch
