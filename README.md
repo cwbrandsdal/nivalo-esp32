@@ -133,13 +133,13 @@ committed identity after restart. Set `enableCliSerial` to `false` for products
 that do not expose this physical provisioning surface.
 
 The claim wire contract is published in `nivalo-protocol/specs/device-claim-v1.md`.
-The remaining backend/console work is deliberately not implemented here: create
-and display organization-scoped codes, expire within ten minutes, atomically
-consume once, lock after five failures, rate-limit by code/IP/hardware ID, reject
-nonce replay/concurrent consumption, make exact retries idempotent while rejecting
-mismatched replay, verify the canonical proof, enforce audited hardware transfers,
-store only a one-way verifier for the device-generated MQTT credential, and return the
-claim response schema without any reusable claim secret.
+The platform backend and console implement the matching organization-scoped
+code issuance, QR/countdown display, bounded expiry and failure lockout,
+code/IP/hardware rate limits, serializable one-use consumption, proof and replay
+validation, audited hardware transfer, idempotent exact retry, one-way MQTT
+credential verification, and password-free response contract. That platform
+change still requires staging deployment and end-to-end acceptance with an
+encrypted physical board before the claim flow can be described as live.
 
 MQTT uses certificate-validating TLS on production port `8883` or the isolated
 staging port `8884`; no other provisioned broker port is accepted. Configure new
