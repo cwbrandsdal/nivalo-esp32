@@ -1,0 +1,11 @@
+{
+  "attemptId": "f9bb43b4-7c4e-44bc-8273-c46f0ec8a201",
+  "claimCode": "ABCD2345",
+  "hardwareId": "esp32-aabbccddeeff",
+  "nonce": "0123456789abcdef0123456789abcdef",
+  "mqttCredential": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  "credentialSha256": "0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a",
+  "manifestUtf8": "NIVALO-DEVICE-CLAIM-V1\nf9bb43b4-7c4e-44bc-8273-c46f0ec8a201\nABCD2345\nesp32-aabbccddeeff\n0123456789abcdef0123456789abcdef\n0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a\n",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEc11jXiI+KAoRU56du+4VwhGQWTQj\nwpdiAvbsL7uX5QxucOx3Nka+0NASRN2vsbCTJDEcndtDxgko+ftXZ+oRuw==\n-----END PUBLIC KEY-----\n",
+  "signatureBase64": "MEUCIQDH2XyRm2q0rMlo83gV/Scgo+gEgiwWqvnRvZ67XBd3BwIgV9JqhyxzIcsaYU21GX0Obg7c2CdoQE3lkJLu1092H68="
+}

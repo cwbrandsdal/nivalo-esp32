@@ -34,10 +34,19 @@ struct NivaloLinkReceivedFrame
     char payload[NIVALO_LINK_MAX_PAYLOAD + 1U];
 };
 
+struct NivaloLinkPinMap
+{
+    uint8_t sck = 5;
+    uint8_t miso = 19;
+    uint8_t mosi = 18;
+    uint8_t chipSelect = 33;
+    uint8_t dataReady = 26;
+};
+
 class NivaloLinkSpiTransport
 {
 public:
-    bool begin();
+    bool begin(const NivaloLinkPinMap &pins = NivaloLinkPinMap());
     void setPaused(bool paused);
     bool isPaused() const;
     bool dataReady() const;
@@ -61,6 +70,7 @@ private:
     const char *_lastError = "";
     uint8_t _txFrame[NIVALO_LINK_SPI_FRAME_SIZE];
     uint8_t _rxFrame[NIVALO_LINK_SPI_FRAME_SIZE];
+    NivaloLinkPinMap _pins;
 };
 
 #endif

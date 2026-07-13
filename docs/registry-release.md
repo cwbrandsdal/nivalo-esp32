@@ -1,0 +1,127 @@
+# Registry release runbook
+
+This repository contains publication preparation only. Adding this workflow does
+not publish a package, create a tag or release, create a repository or remote,
+or change source visibility.
+
+## Package identities
+
+| Package | PlatformIO name | Source metadata version | Release tag |
+|---|---|---|---|
+| Device library | `NivaloDevice` | `0.2.0` | `v0.2.0` |
+| Maintained DAP fork | `Nivalo Adafruit DAP` | `1.8.3-nivalo.1` | `dap-v1.8.3-nivalo.1` |
+
+Tags are immutable release identities. Never move or reuse one. Version changes
+must update both `library.json` and `library.properties`; DAP changes must also
+update `fork-manifest.json`. The release validator rejects mismatches.
+
+The device package intentionally does not declare DAP as an unconditional
+dependency because standalone devices do not compile the bridge. Registry users
+building a bridge must install exact matching releases of both packages. Publish
+and validate the DAP package before publishing a device release that documents
+it as the bridge dependency.
+
+## GitHub configuration
+
+Create a protected GitHub Actions environment named `registry-publication` with
+required reviewers. Configure these repository or environment secrets:
+
+- `NIVALO_DEVICE_PLATFORMIO_AUTH_TOKEN`
+- `NIVALO_DAP_PLATFORMIO_AUTH_TOKEN`
+
+Use separate, least-privilege PlatformIO tokens so either package can be revoked
+without granting access to the other. Configure these non-secret Actions
+variables with the approved PlatformIO account or organization owner names:
+
+- `NIVALO_DEVICE_PLATFORMIO_OWNER`
+- `NIVALO_DAP_PLATFORMIO_OWNER`
+
+Do not add Arduino, GitHub, or PlatformIO credentials to source, workflow inputs,
+release archives, or logs. The workflow maps the selected named token to
+`PLATFORMIO_AUTH_TOKEN` only inside the publish step.
+
+## Dry run
+
+Before creating a tag, run locally:
+
+```sh
+python tests/validate_registry_release.py
+python scripts/prepare_registry_release.py --package device --tag v0.2.0 --output .release-stage
+pio pkg pack .release-stage/device --output dist/device-0.2.0.tar.gz
+```
+
+Use `dap` and `dap-v1.8.3-nivalo.1` for the fork. Inspect the archive file list
+and SHA-256. The staging script excludes tests, repository metadata, build
+outputs, the vendored DAP tree from the device archive, ignored developer
+configuration, symlinks, and private-key PEM material.
+
+The `Registry release` workflow can also be dispatched with `publish=false` and
+an existing `refs/tags/...` ref. It reruns firmware validators, both repository
+builds, staging, packing, archive inspection, and checksum generation without
+contacting a registry.
+
+The prepare job retains its exact archive for seven days as a workflow artifact.
+The protected publish job checks out the reviewed commit SHA, proves the tag
+still identifies it, downloads that same archive, and verifies its recorded
+SHA-256 instead of rebuilding a potentially different tarball.
+
+## PlatformIO publication
+
+1. Confirm the repository visibility and package owner are approved. The
+   workflow makes no assumption that either is public.
+2. Audit the exact commit, dependency graph, upstream DAP provenance and license.
+3. Create a signed, immutable tag outside this workflow only after approval.
+4. Prefer a manual dry run against that tag.
+5. Publish DAP first. Confirm it resolves under the configured owner and build a
+   bridge using its exact package version.
+6. Publish the device package. Confirm a fresh standalone install and a bridge
+   install that explicitly includes the DAP package.
+7. Record tag, commit, archive SHA-256, registry owner/package/version, workflow
+   run, approver and verification results in the release evidence.
+
+A matching tag push requests publication automatically, but the publish job is
+still stopped at the protected `registry-publication` environment. A manual
+publication additionally requires `publish=true` and the exact confirmation
+`PUBLISH <package> <tag>`. The workflow never creates GitHub releases.
+
+## Arduino Library Manager readiness
+
+`NivaloDevice` now has root metadata, an MIT license file, examples, and a
+SemVer-compatible `v0.2.0` tag convention. Arduino submission still requires
+an explicitly approved public GitHub repository, an immutable release tag, a
+release validation run, and a deliberate submission to the official Arduino
+Library Registry. Do not submit a private or unreviewed repository.
+
+The DAP fork is nested and therefore is **not** ready for Arduino Library Manager
+submission from this repository. First create an approved dedicated public
+repository such as `Nivalo_Adafruit_DAP`, preserving upstream commit and license
+provenance; put the current `source/` contents at its root; retain
+`upstream-provenance.json` and `fork-manifest.json`; validate root
+`library.properties`; then create an immutable `1.8.3-nivalo.1` release tag and
+submit that repository separately. This runbook does not authorize or perform
+those operations.
+
+After either Arduino submission, verify index ingestion and install/build from a
+fresh Arduino Library Manager cache. Record the registry index version and test
+result. PlatformIO publication does not prove Arduino readiness.
+
+## Rollback and deprecation
+
+Published versions are immutable. Never overwrite a package version or move its
+tag. If validation fails before publication, reject the environment approval,
+delete only local staging artifacts, and fix the source under a new commit.
+
+If a bad version is published:
+
+1. Disable the `registry-publication` environment and revoke the affected named
+   PlatformIO token.
+2. Mark the version deprecated or remove it only through an owner-reviewed
+   registry operation supported by the registry; do not assume deletion is
+   reversible.
+3. Publish a corrected patch version under a new tag and document the affected
+   version, impact and upgrade path.
+4. Keep provenance and release evidence for the withdrawn version.
+
+For DAP incompatibility, deprecate the DAP version and every device release that
+recommends it together. Keep at least the prior known-good pair documented until
+the replacement has passed both bridge builds and attended STM32 OTA testing.

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "standalone-definitions-request",
+    "command": "requestDefinitions",
+    "argument": "",
+    "functionResult": null,
+    "genericResult": "unhandled",
+    "secondaryMcu": false,
+    "expectedRoute": "definitions",
+    "expectedAcks": ["accepted", "succeeded"]
+  },
+  {
+    "name": "registered-function-success",
+    "command": "setLed",
+    "argument": "on",
+    "functionResult": 1,
+    "genericResult": "unhandled",
+    "secondaryMcu": false,
+    "expectedRoute": "function",
+    "expectedAcks": ["accepted", "succeeded"]
+  },
+  {
+    "name": "registered-function-failure",
+    "command": "setLed",
+    "argument": "invalid",
+    "functionResult": -1,
+    "genericResult": "unhandled",
+    "secondaryMcu": false,
+    "expectedRoute": "function",
+    "expectedAcks": ["accepted", "failed"]
+  },
+  {
+    "name": "generic-command-success",
+    "command": "calibrate",
+    "argument": "{}",
+    "functionResult": null,
+    "genericResult": "succeeded",
+    "secondaryMcu": true,
+    "expectedRoute": "generic",
+    "expectedAcks": ["accepted", "succeeded"]
+  },
+  {
+    "name": "generic-unhandled-bridge-fallback",
+    "command": "mcuOnly",
+    "argument": "{}",
+    "functionResult": null,
+    "genericResult": "unhandled",
+    "secondaryMcu": true,
+    "expectedRoute": "nivalolink",
+    "expectedAcks": ["accepted", "running"]
+  },
+  {
+    "name": "unmatched-standalone",
+    "command": "unknown",
+    "argument": "{}",
+    "functionResult": null,
+    "genericResult": "unhandled",
+    "secondaryMcu": false,
+    "expectedRoute": "unsupported",
+    "expectedAcks": ["accepted", "failed"]
+  }
+]

@@ -1,0 +1,47 @@
+[
+  {
+    "name": "no-recovery-config",
+    "recoveryReady": false,
+    "programOk": true,
+    "verifyOk": true,
+    "recoveryProgramOk": false,
+    "recoveryVerifyOk": false,
+    "expected": "rejected-before-program"
+  },
+  {
+    "name": "verified-update",
+    "recoveryReady": true,
+    "programOk": true,
+    "verifyOk": true,
+    "recoveryProgramOk": false,
+    "recoveryVerifyOk": false,
+    "expected": "succeeded"
+  },
+  {
+    "name": "write-failure-restored",
+    "recoveryReady": true,
+    "programOk": false,
+    "verifyOk": false,
+    "recoveryProgramOk": true,
+    "recoveryVerifyOk": true,
+    "expected": "failed-recovered"
+  },
+  {
+    "name": "verification-failure-restored",
+    "recoveryReady": true,
+    "programOk": true,
+    "verifyOk": false,
+    "recoveryProgramOk": true,
+    "recoveryVerifyOk": true,
+    "expected": "failed-recovered"
+  },
+  {
+    "name": "verification-and-recovery-failure",
+    "recoveryReady": true,
+    "programOk": true,
+    "verifyOk": false,
+    "recoveryProgramOk": true,
+    "recoveryVerifyOk": false,
+    "expected": "failed-unrecovered"
+  }
+]

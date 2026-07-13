@@ -1,0 +1,25 @@
+{
+  "name": "Adafruit DAP library - Nivalo maintained fork",
+  "upstreamRepository": "https://github.com/adafruit/Adafruit_DAP",
+  "upstreamRelease": "1.8.3",
+  "license": "BSD-3-Clause",
+  "sourceStatus": "vendored-active",
+  "publicationStatus": "not-published",
+  "maintenance": {
+    "owner": "Nivalo firmware maintainers",
+    "scope": "STM32 target identification and verified SWD programming support required by Nivalo OTA",
+    "updatePolicy": "Import a reviewed upstream tag, retain upstream history and license, carry the smallest tested patch set, and rebase after each upstream security or compatibility release."
+  },
+  "plannedPackage": {
+    "platformioName": "Nivalo Adafruit DAP",
+    "arduinoName": "Nivalo_Adafruit_DAP",
+    "version": "1.8.3-nivalo.1",
+    "platformioManifest": "source/library.json",
+    "releaseTag": "dap-v1.8.3-nivalo.1"
+  },
+  "localReplacementPaths": {
+    "libraryExample": "symlink://../../third_party/adafruit-dap-nivalo/source",
+    "externalExample": "symlink://../../nivalo-esp32/third_party/adafruit-dap-nivalo/source"
+  },
+  "activationGate": "Repository builds use the reviewed local source. A remote or registry publication still requires explicit owner approval."
+}
