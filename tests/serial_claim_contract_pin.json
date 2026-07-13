@@ -1,0 +1,10 @@
+{
+  "schema": "nivalo.cross-repository-contract-pin.v1",
+  "source": {
+    "repository": "cwbrandsdal/nivalo-platform",
+    "ref": "fb6bdc8a7eea4dc25000779ba896b6006c78e88e",
+    "path": "tools/nivalo-cli/tests/Nivalo.Cli.Tests/Fixtures/cli_claim_request_v1.json"
+  },
+  "localPath": "tests/cli_claim_request_v1.json",
+  "canonicalJsonSha256": "ac4ff1906d316ded5487d5c9fba860e4c0c869bb4f2a32e94cdf885cc1c49db4"
+}
