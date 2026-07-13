@@ -100,11 +100,14 @@ jobs:
           python tests/validate_architecture.py
           python tests/validate_dap_fork.py
           python tests/validate_provisioning.py
+          python -m unittest discover -s tests -p 'test_browser_flash_artifact.py'
           python tests/validate_registry_release.py
           python scripts/prepare_registry_release.py --package "$RELEASE_PACKAGE" --tag "$RELEASE_TAG" --output .release-stage
       - name: Build repository examples
         run: |
           pio run --project-dir examples/Esp32Only
+          pio run --project-dir examples/Esp32Only --environment featheresp32-browser-provisioning
+          python tests/validate_browser_flash_artifact.py
           pio run --project-dir examples/Esp32Stm32Bridge
       - id: archive
         name: Pack and inspect dry-run archive

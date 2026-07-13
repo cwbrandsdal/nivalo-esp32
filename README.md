@@ -5,6 +5,10 @@ ESP32 Arduino/PlatformIO library for Nivalo devices.
 The attended Phase-1 device acceptance procedure and evidence template are in
 [`docs/phase1-hardware-drill.md`](docs/phase1-hardware-drill.md).
 
+The explicit original-ESP32 browser-provisioning artifact build and its
+independent partition fingerprint procedure are documented in
+[`docs/browser-flash-artifact.md`](docs/browser-flash-artifact.md).
+
 `NivaloDevice` is the primary API for both standalone ESP32 devices and ESP32 devices that bridge to a secondary MCU. Secondary MCU support is enabled at build time with `NIVALO_HAS_SECONDARY_MCU=1`.
 
 ## Layout
