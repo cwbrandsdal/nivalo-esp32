@@ -51,7 +51,14 @@ def main() -> None:
     assert '_pending.claimCodeSha256 = ""' in wifi_change
     assert "_pending.claimCodeSha256 = _credentials.claimCodeSha256" not in wifi_change
     assert "NivaloCliClaimRecoveryPolicy::resumeAction" in source
-    assert "if (!readyState && !recoveryRequired) return NIVALO_CLI_CLAIM_REJECT_REPLAY" in recovery_policy
+    assert "if (readyState || ordinaryStartup) return NIVALO_CLI_CLAIM_PRESERVE_STATE" in recovery_policy
+    assert "if (!recoveryRequired) return NIVALO_CLI_CLAIM_REJECT_REPLAY" in recovery_policy
+    assert "NivaloCliClaimRecoveryPolicy::isOrdinaryStartup" in source
+    ordinary_startup = source[source.index("const bool ordinaryStartup") : source.index("const bool recoveryRequired")]
+    assert "NIVALO_PROVISIONING_CONNECTING_WIFI" in ordinary_startup
+    assert "NIVALO_PROVISIONING_SYNCING_TIME" in ordinary_startup
+    assert "_claimAttempt.valid()" in ordinary_startup
+    assert "_changingWifiOnly" in ordinary_startup
     assert "recoveryAction == NIVALO_CLI_CLAIM_REJECT_REPLAY" in source
     replay_start = source.index("const bool readyState")
     replay_end = source.index("_claimAttempt = NivaloPendingClaimAttempt()", replay_start)

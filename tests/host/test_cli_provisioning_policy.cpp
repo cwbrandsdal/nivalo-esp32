@@ -26,17 +26,32 @@ int main()
     require(!isRequestId(requestWithNewline.c_str(), requestWithNewline.size()), "request ID control accepted");
 
     using namespace NivaloCliClaimRecoveryPolicy;
-    require(resumeAction(false, false, false, false) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
+    require(isOrdinaryStartup(true, false, false, false),
+            "ordinary post-reset connection was not recognized");
+    require(isOrdinaryStartup(false, true, false, false),
+            "ordinary post-reset time sync was not recognized");
+    require(!isOrdinaryStartup(true, false, true, false),
+            "pending replacement claim was treated as ordinary startup");
+    require(!isOrdinaryStartup(false, true, false, true),
+            "Wi-Fi-only transition was treated as ordinary startup");
+    require(!isOrdinaryStartup(false, false, false, false),
+            "unrelated state was treated as ordinary startup");
+
+    require(resumeAction(false, false, false, false, false) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
             "unrelated transition accepted a claim replay");
-    require(resumeAction(false, false, true, true) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
+    require(resumeAction(false, false, false, true, true) == NIVALO_CLI_CLAIM_REJECT_REPLAY,
             "connected unrelated transition accepted a claim replay");
-    require(resumeAction(true, false, false, false) == NIVALO_CLI_CLAIM_PRESERVE_STATE,
+    require(resumeAction(true, false, false, false, false) == NIVALO_CLI_CLAIM_PRESERVE_STATE,
             "ready state was overridden by claim replay");
-    require(resumeAction(false, true, false, false) == NIVALO_CLI_CLAIM_CONNECT_WIFI,
+    require(resumeAction(false, true, false, false, false) == NIVALO_CLI_CLAIM_PRESERVE_STATE,
+            "ordinary post-reset connection was overridden by claim replay");
+    require(resumeAction(false, true, false, true, false) == NIVALO_CLI_CLAIM_PRESERVE_STATE,
+            "ordinary post-reset time sync was overridden by claim replay");
+    require(resumeAction(false, false, true, false, false) == NIVALO_CLI_CLAIM_CONNECT_WIFI,
             "recovery did not reconnect Wi-Fi");
-    require(resumeAction(false, true, true, false) == NIVALO_CLI_CLAIM_SYNC_TIME,
+    require(resumeAction(false, false, true, true, false) == NIVALO_CLI_CLAIM_SYNC_TIME,
             "recovery bypassed clock synchronization");
-    require(resumeAction(false, true, true, true) == NIVALO_CLI_CLAIM_READY,
+    require(resumeAction(false, false, true, true, true) == NIVALO_CLI_CLAIM_READY,
             "validated recovery did not become ready");
 
     const std::string uuid = "00000000-0000-4000-8000-000000000000";

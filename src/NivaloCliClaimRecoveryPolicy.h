@@ -12,14 +12,25 @@ enum NivaloCliClaimRecoveryAction
 
 namespace NivaloCliClaimRecoveryPolicy
 {
+inline bool isOrdinaryStartup(
+    bool connectingState,
+    bool syncingState,
+    bool hasPendingAttempt,
+    bool changingWifiOnly)
+{
+    return (connectingState || syncingState) &&
+           !hasPendingAttempt && !changingWifiOnly;
+}
+
 inline NivaloCliClaimRecoveryAction resumeAction(
     bool readyState,
+    bool ordinaryStartup,
     bool recoveryRequired,
     bool wifiConnected,
     bool clockValid)
 {
-    if (!readyState && !recoveryRequired) return NIVALO_CLI_CLAIM_REJECT_REPLAY;
-    if (readyState) return NIVALO_CLI_CLAIM_PRESERVE_STATE;
+    if (readyState || ordinaryStartup) return NIVALO_CLI_CLAIM_PRESERVE_STATE;
+    if (!recoveryRequired) return NIVALO_CLI_CLAIM_REJECT_REPLAY;
     if (!wifiConnected) return NIVALO_CLI_CLAIM_CONNECT_WIFI;
     if (!clockValid) return NIVALO_CLI_CLAIM_SYNC_TIME;
     return NIVALO_CLI_CLAIM_READY;

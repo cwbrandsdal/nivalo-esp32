@@ -518,6 +518,12 @@ bool NivaloProvisioning::handleCliClaim(JsonObject root, const String &requestId
                              constantTimeEqual(_credentials.wifiPassword, wifiPassword);
         claimReceipt = "";
         const bool readyState = _state == NIVALO_PROVISIONING_READY;
+        const bool ordinaryStartup =
+            NivaloCliClaimRecoveryPolicy::isOrdinaryStartup(
+                _state == NIVALO_PROVISIONING_CONNECTING_WIFI,
+                _state == NIVALO_PROVISIONING_SYNCING_TIME,
+                _claimAttempt.valid(),
+                _changingWifiOnly);
         const bool recoveryRequired =
             _state == NIVALO_PROVISIONING_STARTING ||
             _state == NIVALO_PROVISIONING_SETUP_PORTAL ||
@@ -525,11 +531,14 @@ bool NivaloProvisioning::handleCliClaim(JsonObject root, const String &requestId
         const NivaloCliClaimRecoveryAction recoveryAction =
             NivaloCliClaimRecoveryPolicy::resumeAction(
                 readyState,
+                ordinaryStartup,
                 recoveryRequired,
                 WiFi.status() == WL_CONNECTED,
                 clockPermitsTls());
+        const bool mustClearCommittedPending =
+            recoveryAction != NIVALO_CLI_CLAIM_PRESERVE_STATE;
         if (!matches || recoveryAction == NIVALO_CLI_CLAIM_REJECT_REPLAY ||
-            !_store.clearPending()) return false;
+            (mustClearCommittedPending && !_store.clearPending())) return false;
         _claimAttempt = NivaloPendingClaimAttempt();
         _pendingClaimCode = "";
         _changingWifiOnly = false;
