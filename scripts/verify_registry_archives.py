@@ -17,7 +17,10 @@ DEVICE_LOCAL_DEPENDENCY = "symlink://../.."
 
 
 def extract_archive(archive: Path, destination: Path) -> None:
-    destination.mkdir(parents=True)
+    try:
+        destination.mkdir(parents=True)
+    except FileExistsError as error:
+        raise ValueError(f"archive destination already exists: {destination}") from error
     destination_root = destination.resolve()
     with tarfile.open(archive, "r:gz") as package:
         for member in package.getmembers():

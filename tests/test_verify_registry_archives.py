@@ -18,6 +18,41 @@ SPEC.loader.exec_module(verify)
 
 
 class RegistryArchiveTests(unittest.TestCase):
+    def test_extract_rejects_existing_destination_directory_without_modifying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "package.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo("payload")
+                member.size = 1
+                package.addfile(member, io.BytesIO(b"x"))
+            destination = root / "extract"
+            destination.mkdir()
+            sentinel = destination / "sentinel"
+            sentinel.write_bytes(b"keep")
+
+            with self.assertRaisesRegex(ValueError, "archive destination already exists"):
+                verify.extract_archive(archive, destination)
+
+            self.assertEqual(sentinel.read_bytes(), b"keep")
+            self.assertFalse((destination / "payload").exists())
+
+    def test_extract_rejects_existing_destination_file_without_modifying_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "package.tar.gz"
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo("payload")
+                member.size = 1
+                package.addfile(member, io.BytesIO(b"x"))
+            destination = root / "extract"
+            destination.write_bytes(b"keep")
+
+            with self.assertRaisesRegex(ValueError, "archive destination already exists"):
+                verify.extract_archive(archive, destination)
+
+            self.assertEqual(destination.read_bytes(), b"keep")
+
     def test_extract_rejects_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
