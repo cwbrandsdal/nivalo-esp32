@@ -62,7 +62,19 @@ jobs:
       - name: Validate maintained Adafruit DAP fork
         run: python tests/validate_dap_fork.py
       - name: Validate registry release readiness
-        run: python tests/validate_registry_release.py
+        run: |
+          python tests/validate_registry_release.py
+          python -m unittest discover -s tests -p 'test_verify_registry_archives.py'
+      - name: Validate Arduino library specification
+        run: |
+          lint_dir="$RUNNER_TEMP/arduino-lint-1.3.0"
+          mkdir -p "$lint_dir"
+          curl --fail --silent --show-error --location \
+            --output "$lint_dir/arduino-lint.tar.gz" \
+            https://github.com/arduino/arduino-lint/releases/download/1.3.0/arduino-lint_1.3.0_Linux_64bit.tar.gz
+          echo "181671ca174988f2601e1cdf2b40a552682db8eaa047de33117e67e70338b63e  $lint_dir/arduino-lint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$lint_dir/arduino-lint.tar.gz" -C "$lint_dir" arduino-lint
+          "$lint_dir/arduino-lint" --compliance specification --library-manager=false --project-type library --recursive=false
       - name: Validate runtime provisioning
         run: python tests/validate_provisioning.py
       - name: Validate CLI serial contracts
@@ -81,3 +93,35 @@ jobs:
           python tests/validate_browser_flash_artifact.py
       - name: Build ESP32-STM32 bridge example
         run: pio run --project-dir examples/Esp32Stm32Bridge
+      - name: Build Arduino runtime-provisioning example
+        run: >-
+          pio ci --lib . --board featheresp32
+          --project-option "platform=espressif32@7.0.1"
+          --project-option "framework=arduino"
+          examples/NivaloRuntimeProvisioning/NivaloRuntimeProvisioning.ino
+      - name: Build clean consumers from registry archives
+        run: |
+          device_tag="$(python scripts/prepare_registry_release.py --package device --identity-field tag)"
+          dap_tag="$(python scripts/prepare_registry_release.py --package dap --identity-field tag)"
+          device_archive="$(python scripts/prepare_registry_release.py --package device --identity-field archive)"
+          dap_archive="$(python scripts/prepare_registry_release.py --package dap --identity-field archive)"
+          python scripts/prepare_registry_release.py --package device --tag "$device_tag" --dap-owner nivalo-ci --output .release-stage
+          python scripts/prepare_registry_release.py --package dap --tag "$dap_tag" --output .release-stage
+          mkdir -p .release-archives
+          pio pkg pack .release-stage/device --output ".release-archives/$device_archive"
+          pio pkg pack .release-stage/dap --output ".release-archives/$dap_archive"
+          python scripts/verify_registry_archives.py \
+            --device ".release-archives/$device_archive" \
+            --dap ".release-archives/$dap_archive"
+
+  registry-portability:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Validate registry tooling on Windows
+        run: |
+          python tests/validate_registry_release.py
+          python -m unittest discover -s tests -p 'test_verify_registry_archives.py'

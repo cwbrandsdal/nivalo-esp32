@@ -46,7 +46,7 @@ Before creating a tag, run locally:
 
 ```sh
 python tests/validate_registry_release.py
-python scripts/prepare_registry_release.py --package device --tag v0.2.0 --output .release-stage
+python scripts/prepare_registry_release.py --package device --tag v0.2.0 --dap-owner <approved-owner> --output .release-stage
 pio pkg pack .release-stage/device --output dist/device-0.2.0.tar.gz
 ```
 
@@ -54,6 +54,27 @@ Use `dap` and `dap-v1.8.3-nivalo.1` for the fork. Inspect the archive file list
 and SHA-256. The staging script excludes tests, repository metadata, build
 outputs, the vendored DAP tree from the device archive, ignored developer
 configuration, symlinks, and private-key PEM material.
+
+The staged device package retains the browser-provisioning post-build script and
+its artifact helper at the exact path used by the packaged example. Its bridge
+example is normalized for a registry consumer: workstation upload/monitor ports
+and repository-local DAP paths are removed, and the exact reviewed
+`<approved-owner>/Nivalo Adafruit DAP@1.8.3-nivalo.1` dependency is selected.
+The owner comes from the reviewed `NIVALO_DAP_PLATFORMIO_OWNER` variable, so a
+same-name package under a different namespace cannot satisfy the release. The
+source examples remain optimized for repository-local development. Release
+validation fails closed if any of these packaged-tree invariants drift.
+
+CI packs both release candidates and builds three clean consumers from those
+exact archives: the browser-provisioning artifact, a standalone device, and a
+bridge with the maintained DAP package. The release workflow repeats the same
+archive builds before it retains the selected package. It also runs the official
+Arduino Lint 1.3.0 binary after verifying its published SHA-256; normal CI uses
+specification compliance. Strict Library Manager submission compliance runs for
+a device release only after the repository has deliberately been made public,
+because the official submission check must be able to resolve the repository
+URL. PlatformIO validation and publication do not require that visibility
+change.
 
 The `Registry release` workflow can also be dispatched with `publish=false` and
 an existing `refs/tags/...` ref. It reruns firmware validators, both repository
@@ -79,10 +100,12 @@ SHA-256 instead of rebuilding a potentially different tarball.
 7. Record tag, commit, archive SHA-256, registry owner/package/version, workflow
    run, approver and verification results in the release evidence.
 
-A matching tag push requests publication automatically, but the publish job is
-still stopped at the protected `registry-publication` environment. A manual
-publication additionally requires `publish=true` and the exact confirmation
-`PUBLISH <package> <tag>`. The workflow never creates GitHub releases.
+A matching tag push is validation-only. Publication requires a manual dispatch
+against the exact immutable `refs/tags/...` ref with `publish=true`, the exact
+confirmation `PUBLISH <package> <tag>`, and approval in the protected
+`registry-publication` environment. Device publication also verifies that the
+exact reviewed DAP version already resolves under its configured PlatformIO
+owner. The workflow never creates GitHub releases.
 
 ## Arduino Library Manager readiness
 
