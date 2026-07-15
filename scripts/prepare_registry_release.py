@@ -16,6 +16,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGES = ("device", "dap")
+DEVICE_RELEASE_SCRIPTS = (
+    "browser_flash_artifact.py",
+    "browser_flash_platformio.py",
+)
+DAP_LOCAL_SOURCE = "../../third_party/adafruit-dap-nivalo/source"
+LOCAL_PORT_KEYS = {"upload_port", "monitor_port"}
 
 
 def properties(path: Path) -> dict[str, str]:
@@ -29,6 +35,26 @@ def properties(path: Path) -> dict[str, str]:
 
 def expected_tag(package: str, version: str) -> str:
     return f"v{version}" if package == "device" else f"dap-v{version}"
+
+
+def dap_registry_dependency(owner: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", owner):
+        raise ValueError("DAP PlatformIO owner is required and has an invalid format")
+    source = ROOT / "third_party/adafruit-dap-nivalo/source"
+    manifest = json.loads((source / "library.json").read_text(encoding="utf-8"))
+    fork = json.loads((source.parent / "fork-manifest.json").read_text(encoding="utf-8"))
+    name = manifest.get("name")
+    version = manifest.get("version")
+    planned = fork.get("plannedPackage", {})
+    if (
+        name != "Nivalo Adafruit DAP"
+        or not isinstance(version, str)
+        or planned.get("platformioName") != name
+        or planned.get("version") != version
+        or planned.get("releaseTag") != expected_tag("dap", version)
+    ):
+        raise ValueError("DAP registry identity does not match the reviewed fork plan")
+    return f"{owner}/{name}@{version}"
 
 
 def validate(package: str, tag: str) -> str:
@@ -81,6 +107,23 @@ def validate(package: str, tag: str) -> str:
     return version
 
 
+def release_identity(package: str) -> dict[str, str]:
+    if package == "device":
+        manifest_path = ROOT / "library.json"
+    elif package == "dap":
+        manifest_path = ROOT / "third_party/adafruit-dap-nivalo/source/library.json"
+    else:
+        raise ValueError(f"unsupported package: {package}")
+    version = json.loads(manifest_path.read_text(encoding="utf-8"))["version"]
+    tag = expected_tag(package, version)
+    validate(package, tag)
+    return {
+        "version": version,
+        "tag": tag,
+        "archive": f"{package}-{version}.tar.gz",
+    }
+
+
 def ensure_safe_stage(stage: Path) -> None:
     forbidden_names = {".git", ".pio", ".env", "nivalo_config.h"}
     for path in stage.rglob("*"):
@@ -92,8 +135,69 @@ def ensure_safe_stage(stage: Path) -> None:
                 raise ValueError(f"private key material in release: {path.relative_to(stage)}")
 
 
-def stage_package(package: str, tag: str, output: Path) -> Path:
+def normalize_registry_bridge_config(path: Path, dap_owner: str) -> None:
+    """Remove workstation-only settings and select the exact registry DAP package."""
+
+    dependency = dap_registry_dependency(dap_owner)
+    source = path.read_text(encoding="utf-8")
+    normalized_lines: list[str] = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        key = stripped.partition("=")[0].strip().lower()
+        if key in LOCAL_PORT_KEYS:
+            continue
+        if stripped == f"-I{DAP_LOCAL_SOURCE}":
+            continue
+        if stripped == f"symlink://{DAP_LOCAL_SOURCE}":
+            indentation = line[: len(line) - len(line.lstrip())]
+            normalized_lines.append(f"{indentation}{dependency}")
+            continue
+        normalized_lines.append(line)
+
+    normalized = "\n".join(normalized_lines) + "\n"
+    path.write_text(normalized, encoding="utf-8", newline="\n")
+
+
+def ensure_device_stage(stage: Path, dap_owner: str) -> None:
+    browser_project = stage / "examples/Esp32Only"
+    browser_config = browser_project / "platformio.ini"
+    bridge_config = stage / "examples/Esp32Stm32Bridge/platformio.ini"
+    expected_script = stage / "scripts/browser_flash_platformio.py"
+    expected_helper = stage / "scripts/browser_flash_artifact.py"
+    for required in (browser_config, bridge_config, expected_script, expected_helper):
+        if not required.is_file():
+            raise ValueError(f"device stage is missing {required.relative_to(stage)}")
+
+    matches = re.findall(
+        r"^\s*extra_scripts\s*=\s*post:([^\s]+)\s*$",
+        browser_config.read_text(encoding="utf-8"),
+        flags=re.MULTILINE,
+    )
+    if len(matches) != 1:
+        raise ValueError("browser example must select exactly one post-build script")
+    selected_script = (browser_project / matches[0]).resolve()
+    if selected_script != expected_script.resolve():
+        raise ValueError("browser example post-build script does not resolve inside the package")
+
+    bridge = bridge_config.read_text(encoding="utf-8")
+    normalized_local_path = bridge.replace("\\", "/")
+    if "third_party/adafruit-dap-nivalo" in normalized_local_path:
+        raise ValueError("registry bridge example retains a repository-local DAP path")
+    for line in bridge.splitlines():
+        key = line.strip().partition("=")[0].strip().lower()
+        if key in LOCAL_PORT_KEYS:
+            raise ValueError("registry bridge example retains a workstation serial port")
+    dependency = dap_registry_dependency(dap_owner)
+    if sum(line.strip() == dependency for line in bridge.splitlines()) != 1:
+        raise ValueError("registry bridge example must select the exact DAP package once")
+
+
+def stage_package(
+    package: str, tag: str, output: Path, dap_owner: str | None = None
+) -> Path:
     validate(package, tag)
+    if package == "device" and dap_owner is None:
+        raise ValueError("--dap-owner is required when staging the device package")
     destination = output / package
     if destination.exists():
         shutil.rmtree(destination)
@@ -108,6 +212,14 @@ def stage_package(package: str, tag: str, output: Path) -> Path:
             destination / "examples",
             ignore=shutil.ignore_patterns(".pio", "nivalo_config.h"),
         )
+        scripts = destination / "scripts"
+        scripts.mkdir()
+        for name in DEVICE_RELEASE_SCRIPTS:
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        normalize_registry_bridge_config(
+            destination / "examples/Esp32Stm32Bridge/platformio.ini", dap_owner
+        )
+        ensure_device_stage(destination, dap_owner)
     else:
         source = ROOT / "third_party/adafruit-dap-nivalo/source"
         for path in source.iterdir():
@@ -121,10 +233,21 @@ def stage_package(package: str, tag: str, output: Path) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--package", choices=PACKAGES, required=True)
-    parser.add_argument("--tag", required=True)
+    parser.add_argument("--tag")
+    parser.add_argument("--dap-owner")
+    parser.add_argument("--identity-field", choices=("version", "tag", "archive"))
     parser.add_argument("--output", type=Path, default=ROOT / "dist/registry-stage")
     args = parser.parse_args()
-    stage = stage_package(args.package, args.tag, args.output.resolve())
+    if args.identity_field:
+        if args.tag:
+            parser.error("--tag and --identity-field cannot be used together")
+        print(release_identity(args.package)[args.identity_field])
+        return
+    if not args.tag:
+        parser.error("--tag is required when staging a package")
+    stage = stage_package(
+        args.package, args.tag, args.output.resolve(), dap_owner=args.dap_owner
+    )
     print(stage)
 
 
