@@ -8,6 +8,7 @@ namespace
 static constexpr size_t UartMessageJsonCapacity = 2048U;
 static constexpr size_t DefinitionsJsonCapacity = 3072U;
 static constexpr unsigned long PeriodicPollMs = 1000UL;
+static constexpr unsigned long HelloMs = 30000UL;
 static constexpr unsigned long HeartbeatMs = 30000UL;
 static constexpr unsigned long InvalidFrameReportMs = 10000UL;
 static constexpr unsigned long InvalidFrameBackoffMs = 250UL;
@@ -302,6 +303,7 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
     }
 
     unsigned long now = millis();
+    bool helloDue = _link.helloPending || (now - _link.lastHello) >= HelloMs;
     bool heartbeatDue = (now - _link.lastHeartbeat) >= HeartbeatMs;
     bool pollDue = (now - _link.lastPoll) >= PeriodicPollMs;
     if (!forcePoll && !heartbeatDue && now < _link.backoffUntil)
@@ -309,7 +311,7 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
         return;
     }
 
-    bool shouldDrain = forcePoll || _link.transport().dataReady() || heartbeatDue || pollDue;
+    bool shouldDrain = forcePoll || _link.transport().dataReady() || helloDue || heartbeatDue || pollDue;
     if (!shouldDrain)
     {
         return;
@@ -320,7 +322,24 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
     {
         NivaloLinkReceivedFrame frame;
         bool sent;
-        if (heartbeatDue)
+        if (helloDue)
+        {
+            StaticJsonDocument<160> hello;
+            hello["protocol"] = "NivaloLink";
+            hello["version"] = 1;
+            hello["frameSize"] = NIVALO_LINK_SPI_FRAME_SIZE;
+            hello["transport"] = "spi-master";
+            String payload;
+            serializeJson(hello, payload);
+            sent = _link.transport().exchange(NIVALO_LINK_FRAME_HELLO, payload.c_str(), &frame);
+            if (sent)
+            {
+                _link.helloPending = false;
+                _link.lastHello = now;
+                helloDue = false;
+            }
+        }
+        else if (heartbeatDue)
         {
             StaticJsonDocument<128> heartbeat;
             heartbeat["uptimeMs"] = millis();
@@ -379,4 +398,3 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
         drained++;
     } while ((forcePoll || _link.transport().dataReady()) && drained < DrainLimit);
 }
-
