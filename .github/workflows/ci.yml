@@ -80,6 +80,8 @@ jobs:
         run: python tests/validate_provisioning.py
       - name: Validate CLI serial contracts
         run: python tests/validate_cli_serial.py
+      - name: Test attended CLI mismatch probe
+        run: python -m unittest discover -s tests -p 'test_phase1_cli_mismatch_probe.py'
       - name: Validate pinned platform serial-claim fixture
         run: python tests/validate_serial_claim_contract.py
       - name: Test browser-flash artifact tooling
