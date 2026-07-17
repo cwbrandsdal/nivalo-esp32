@@ -58,6 +58,89 @@ the long-lived trust anchor.
 - [ ] Confirm rollback firmware/configuration and the operator responsible for
       restoring them.
 
+## Attended staging claim and standalone LED acceptance
+
+The tools have deliberately separate authority. The authenticated staging
+console issues the short-lived claim code and later invokes the function. The
+CLI only identifies the USB board and carries the operator-entered code and
+Wi-Fi values over the selected serial port. The ESP32 itself performs the HTTPS
+claim, creates its proof key and MQTT credential, validates MQTT TLS, and
+commits the identity. Do not substitute a host-side call to the public exchange
+endpoint.
+
+The CLI can complete the positive serial claim and an exact-code recovery
+retry. It cannot create a claim code, invoke `setLed`, deliberately forge a
+hardware mismatch, factory-reset the board, or distinguish a distributed
+rate-limit rejection from another generic claim rejection. Use the console and
+the bounded evidence sources in the negative-case table below for those steps.
+
+1. In a private PowerShell window, build or install the reviewed `nivalo` CLI.
+   Do not enable terminal transcription. Keep the CLI source revision and the
+   firmware revision in the evidence record.
+2. Confirm that the already-flashed application was built with the staging
+   HTTPS claim URL, `NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE=0`, and only the
+   explicit evaluation-board unencrypted-NVS exception. Do not rebuild or
+   upload merely to perform this check.
+3. Confirm the intended board is currently `COM6`. Close PlatformIO monitors
+   and every other process that may hold the port.
+4. Sign in to `https://iot-staging.nivalo.io` as an administrator. Open **Add
+   device**, choose **Create claim code**, and keep the code in that private
+   browser/terminal session. Do not copy it to chat, a ticket, shell history,
+   or the evidence file.
+5. Run the CLI without secret-bearing arguments or environment variables:
+
+   ```powershell
+   nivalo device claim --port COM6 --baud 115200 --timeout-seconds 300
+   ```
+
+   Enter the claim code (or canonical QR URI), Wi-Fi SSID, and Wi-Fi password
+   only at the CLI's non-echoing prompts. The CLI identifies the device before
+   accepting these values and binds the request to that exact hardware
+   identity.
+6. Confirm the CLI succeeds, the exact console claim changes to `claimed`, and
+   the same device becomes online. Record only timestamps, repository
+   revisions, the non-secret device row ID, and PASS/FAIL. Do not retain the
+   hardware identity, claim/QR value, Wi-Fi values, MQTT identity, proof, token,
+   or raw serial request/response.
+7. Confirm MQTT uses `mqtt-staging.nivalo.io:8884`, TLS is certificate- and
+   hostname-valid, and the console receives availability plus runtime
+   telemetry. A TCP connection alone is not MQTT TLS acceptance.
+8. Review and approve the device-reported capability set if it is pending.
+   Confirm `setLed` and `ledState` are present. In **Functions**, call `setLed`
+   with the JSON string `"on"`, then `"off"`. For each call, retain the command
+   ID, prove `accepted` precedes terminal `succeeded`, and confirm the physical
+   LED and the next published `ledState` agree. On active-low boards, record the
+   observed electrical polarity rather than rewriting the logical result.
+9. Send one unsupported benign command through the reviewed command surface
+   and confirm terminal `failed`. Do not use firmware, reset, or destructive
+   commands for this check.
+
+### Claim recovery and negative-case coverage
+
+Run destructive cases only while the board has no committed identity. Run the
+successful lost-response recovery last: after an identity is committed, a
+different code is intentionally rejected until an explicit factory reset or
+audited transfer. Never erase or reflash merely to make a failed case pass.
+
+| Case | Attended action | Required proof and recovery |
+|---|---|---|
+| Serial hardware mismatch | With the unclaimed board attended on `COM6`, run `python scripts/phase1_cli_mismatch_probe.py --port COM6`. The probe first identifies the board, substitutes a different syntactically valid expected hardware identity in memory, and sends fixed non-secret placeholders. The normal CLI cannot generate this request. | The generic failed acknowledgement is only a provisional observation because every claim rejection is intentionally indistinguishable. Classify this case PASS only after the same immutable image, with no erase/reflash or configuration change, completes the positive claim below. Retain the probe's single `OBSERVED` line and revisions only; never either identity. |
+| Expired code | Issue a code, allow the console countdown to reach zero, then submit it through the normal masked CLI prompts while the board is unclaimed. | CLI/device fail generically; console remains `expired`; no device row or active identity is created. Replace the pending attempt with a newly issued code only after recording the result. |
+| Reset before commit | Issue a fresh code and start the normal serial claim. Reset the ESP32 only after the request has been accepted and its pending attempt is durable, but before the console reports `claimed`. Let the first CLI invocation time out, then rerun with the exact same code and Wi-Fi values. | The second run resumes the same durable attempt and creates at most one device. Confirm one claim row, one device, and no credential rotation. Do not disclose the attempt, proof, or credential. |
+| Lost terminal response around commit | Start a fresh claim and, after the console reports that exact claim as `claimed` but before the CLI receives its terminal acknowledgement, disconnect USB or terminate only the CLI. Console `claimed` proves API consumption but occurs before MQTT verification and the local commit, so it is not by itself a post-commit discriminator. Reconnect the same board and rerun with the exact same code and Wi-Fi values before expiry. | In correlation-bound audit evidence, a new `device-claim-retry-returned` event means the first interruption was pre-commit and the server exact-retry path succeeded. CLI success with no new retry event, the same device, and no rotation is evidence of the encrypted local receipt path, which makes no API exchange. Record the observed branch; if the CLI had already acknowledged or the audit discriminator is unavailable, record the local-receipt case NOT EXECUTED. |
+| Exact retry after expiry | After a successful lost-response retry, allow the original code's bounded expiry to pass before attempting any server exchange replay. | The server-side integration acceptance must prove generic rejection after expiry and no rotation. The active device may continue normal MQTT operation; do not factory-reset it solely for this API property. |
+| Distributed rate limit | Do not infer this from a generic CLI rejection. The current repositories have deterministic single- and multi-instance tests but no reviewed live staging claim-rate harness or correlation seam. Implement and review that harness before attempting this case against both API lanes. | Until that prerequisite exists, record live rate-limit acceptance OPEN and cite only the green repository tests. A future harness must prove the shared Redis hardware/code/source-IP budget, denial, window recovery, and unchanged database state while retaining only aggregate counters/timestamps and lane identities. |
+| Wi-Fi change | After the positive claim, hold the configured setup button for three seconds and submit new Wi-Fi with a blank claim code through the captive setup flow. | The device keeps the same identity and MQTT credential, reconnects with TLS, and returns online without a firmware rebuild. Restore the approved bench Wi-Fi before closeout. |
+
+Repository evidence for the server-only expiry, mismatch, lost-response,
+concurrency, lockout, and distributed-rate properties is in
+`Nivalo.IoT.Api.Tests` (`DeviceClaimServiceTests`,
+`DeviceClaimEndpointTests`, and `DistributedDeviceClaimRateLimiterTests`).
+Firmware transaction and exact-retry coverage is in `tests/host` plus
+`tests/validate_cli_serial.py`, `tests/validate_provisioning.py`, and the pinned
+cross-repository claim fixture. Automated coverage is required but does not
+replace the positive physical claim, TLS, LED, and ACK observations above.
+
 ## TLS positive and negative cases
 
 ### Valid trust and hostname
