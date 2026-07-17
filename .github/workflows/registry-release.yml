@@ -108,6 +108,7 @@ jobs:
           python tests/validate_provisioning.py
           python -m unittest discover -s tests -p 'test_browser_flash_artifact.py'
           python tests/validate_registry_release.py
+          python -m unittest discover -s tests -p 'test_pack_registry_archive.py'
           python -m unittest discover -s tests -p 'test_verify_registry_archives.py'
           device_tag="$(python scripts/prepare_registry_release.py --package device --identity-field tag)"
           dap_tag="$(python scripts/prepare_registry_release.py --package dap --identity-field tag)"
@@ -143,14 +144,15 @@ jobs:
           mkdir -p dist
           device_archive="$(python scripts/prepare_registry_release.py --package device --identity-field archive)"
           dap_archive="$(python scripts/prepare_registry_release.py --package dap --identity-field archive)"
-          pio pkg pack .release-stage/device --output "dist/$device_archive"
-          pio pkg pack .release-stage/dap --output "dist/$dap_archive"
+          python scripts/pack_registry_archive.py .release-stage/device --output "dist/$device_archive"
+          python scripts/pack_registry_archive.py .release-stage/dap --output "dist/$dap_archive"
           [[ -f "dist/$RELEASE_ARCHIVE" ]]
           tar -tzf "dist/$RELEASE_ARCHIVE"
           sha256sum "dist/$RELEASE_ARCHIVE"
           python scripts/verify_registry_archives.py \
             --device "dist/$device_archive" \
-            --dap "dist/$dap_archive"
+            --dap "dist/$dap_archive" \
+            --fresh-core-dir "$RUNNER_TEMP/nivalo-registry-platformio-core"
           checksum="$(sha256sum "dist/$RELEASE_ARCHIVE" | cut -d ' ' -f 1)"
           echo "checksum=$checksum" >> "$GITHUB_OUTPUT"
       - name: Retain exact reviewed archive for the guarded publish job

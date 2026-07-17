@@ -47,7 +47,13 @@ Before creating a tag, run locally:
 ```sh
 python tests/validate_registry_release.py
 python scripts/prepare_registry_release.py --package device --tag v0.2.0 --dap-owner <approved-owner> --output .release-stage
-pio pkg pack .release-stage/device --output dist/device-0.2.0.tar.gz
+python scripts/prepare_registry_release.py --package dap --tag dap-v1.8.3-nivalo.1 --output .release-stage
+python scripts/pack_registry_archive.py .release-stage/device --output dist/device-0.2.0.tar.gz
+python scripts/pack_registry_archive.py .release-stage/dap --output dist/dap-1.8.3-nivalo.1.tar.gz
+python scripts/verify_registry_archives.py \
+  --device dist/device-0.2.0.tar.gz \
+  --dap dist/dap-1.8.3-nivalo.1.tar.gz \
+  --fresh-core-dir <empty-platformio-core>
 ```
 
 Use `dap` and `dap-v1.8.3-nivalo.1` for the fork. Inspect the archive file list
@@ -80,6 +86,26 @@ The `Registry release` workflow can also be dispatched with `publish=false` and
 an existing `refs/tags/...` ref. It reruns firmware validators, both repository
 builds, staging, packing, archive inspection, and checksum generation without
 contacting a registry.
+
+The repository packer writes a byte-reproducible archive: members are sorted,
+ownership and modes are canonical, and tar/gzip timestamps are zero. Repeating
+the stage and pack steps for the same source must produce the same SHA-256 with
+the pinned release toolchain, independent of source file timestamps, line-ending
+style, and workstation permission bits. Repository text is checked out as LF,
+and the packer also canonicalizes the explicit release-text formats before
+archiving. It refuses to overwrite an archive, so use a new
+output path for a second comparison. Release CI builds the exact archives with an explicitly
+empty `PLATFORMIO_CORE_DIR`; this proves that success does not depend on a
+developer's cached platform, framework, toolchain, or library packages. The
+verifier installs the exact pinned platform into that empty directory before
+compilation, then installs all library dependencies while building the three
+fresh consumers. Archive-consumer builds use one compiler job so a first-use
+toolchain extraction is not coupled to workstation CPU/process limits. On
+Windows it also compiles a throwaway object with the newly extracted toolchain,
+using a bounded three-attempt readiness probe before any package build.
+Keep the Windows core path short (for example `C:\pio-empty`) because the pinned
+Xtensa GCC toolchain is not long-path safe. The verifier fails without falling
+back to the normal PlatformIO cache.
 
 The prepare job retains its exact archive for seven days as a workflow artifact.
 The protected publish job checks out the reviewed commit SHA, proves the tag

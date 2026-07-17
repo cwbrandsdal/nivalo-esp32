@@ -10,10 +10,12 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 from pathlib import Path
 
 
 DEVICE_LOCAL_DEPENDENCY = "symlink://../.."
+PINNED_PLATFORM = "espressif32@7.0.1"
 
 
 def extract_archive(archive: Path, destination: Path) -> None:
@@ -39,8 +41,8 @@ def replace_once(path: Path, old: str, new: str) -> None:
     path.write_text(source.replace(old, new), encoding="utf-8", newline="\n")
 
 
-def run(*arguments: str) -> None:
-    subprocess.run(arguments, check=True)
+def run(*arguments: str, environment: dict[str, str] | None = None) -> None:
+    subprocess.run(arguments, check=True, env=environment)
 
 
 def platformio_file_uri(path: Path) -> str:
@@ -51,7 +53,62 @@ def platformio_file_uri(path: Path) -> str:
     return path.as_uri()
 
 
-def build_archives(device_archive: Path, dap_archive: Path) -> None:
+def fresh_platformio_environment(core_dir: Path | None) -> dict[str, str] | None:
+    if core_dir is None:
+        return None
+    core_dir = core_dir.resolve()
+    if core_dir.exists() and any(core_dir.iterdir()):
+        raise ValueError(f"PlatformIO core directory is not empty: {core_dir}")
+    core_dir.mkdir(parents=True, exist_ok=True)
+    environment = os.environ.copy()
+    environment["PLATFORMIO_CORE_DIR"] = str(core_dir)
+    return environment
+
+
+def preflight_windows_toolchain(
+    core_dir: Path | None,
+    environment: dict[str, str] | None,
+    attempts: int = 3,
+    windows: bool | None = None,
+) -> None:
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows or core_dir is None or environment is None:
+        return
+    compiler = (
+        core_dir.resolve()
+        / "packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-g++.exe"
+    )
+    if not compiler.is_file():
+        raise FileNotFoundError(
+            f"fresh PlatformIO toolchain is missing {compiler.name}"
+        )
+    last_error = ""
+    with tempfile.TemporaryDirectory(prefix="nivalo-toolchain-preflight-") as temporary:
+        source = Path(temporary) / "preflight.cpp"
+        output = Path(temporary) / "preflight.o"
+        source.write_text("int nivalo_registry_preflight = 1;\n", encoding="ascii")
+        for attempt in range(attempts):
+            completed = subprocess.run(
+                [str(compiler), "-c", str(source), "-o", str(output)],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=environment,
+            )
+            if completed.returncode == 0 and output.is_file():
+                return
+            last_error = completed.stderr.strip()
+            time.sleep(0.25 * (attempt + 1))
+    raise RuntimeError(
+        "fresh PlatformIO compiler preflight failed after "
+        f"{attempts} attempts: {last_error}"
+    )
+
+
+def build_archives(
+    device_archive: Path, dap_archive: Path, fresh_core_dir: Path | None = None
+) -> None:
     pio = shutil.which("pio") or shutil.which("platformio")
     if not pio:
         raise RuntimeError("PlatformIO CLI is not available")
@@ -61,6 +118,20 @@ def build_archives(device_archive: Path, dap_archive: Path) -> None:
     if not device_archive.is_file() or not dap_archive.is_file():
         raise FileNotFoundError("both device and DAP archives are required")
 
+    environment = fresh_platformio_environment(fresh_core_dir)
+    if environment is not None:
+        # Separate installation from compilation and prove the newly extracted
+        # Windows compiler subprocess chain is ready before a package build.
+        run(
+            pio,
+            "pkg",
+            "install",
+            "--global",
+            "--platform",
+            PINNED_PLATFORM,
+            environment=environment,
+        )
+        preflight_windows_toolchain(fresh_core_dir, environment)
     with tempfile.TemporaryDirectory(prefix="nivalo-registry-consumer-") as temporary:
         root = Path(temporary)
         extracted = root / "device-package"
@@ -80,6 +151,9 @@ def build_archives(device_archive: Path, dap_archive: Path) -> None:
             str(browser_project),
             "--environment",
             "featheresp32-browser-provisioning",
+            "--jobs",
+            "1",
+            environment=environment,
         )
         browser_build = browser_project / ".pio/build/featheresp32-browser-provisioning"
         for required in (
@@ -104,6 +178,9 @@ def build_archives(device_archive: Path, dap_archive: Path) -> None:
             str(standalone),
             "--environment",
             "featheresp32",
+            "--jobs",
+            "1",
+            environment=environment,
         )
 
         bridge = root / "bridge-consumer"
@@ -134,6 +211,9 @@ def build_archives(device_archive: Path, dap_archive: Path) -> None:
             str(bridge),
             "--environment",
             "featheresp32",
+            "--jobs",
+            "1",
+            environment=environment,
         )
 
 
@@ -141,8 +221,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=Path, required=True)
     parser.add_argument("--dap", type=Path, required=True)
+    parser.add_argument(
+        "--fresh-core-dir",
+        type=Path,
+        help="require and use an empty PlatformIO core/cache directory",
+    )
     args = parser.parse_args()
-    build_archives(args.device, args.dap)
+    build_archives(args.device, args.dap, fresh_core_dir=args.fresh_core_dir)
     print("verified browser, standalone, and bridge builds from exact registry archives")
 
 

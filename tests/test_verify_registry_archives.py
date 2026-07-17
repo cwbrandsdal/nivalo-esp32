@@ -7,6 +7,8 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -94,6 +96,44 @@ class RegistryArchiveTests(unittest.TestCase):
         self.assertTrue(uri.startswith("file://"))
         if os.name == "nt":
             self.assertFalse(uri.startswith("file:///"))
+
+    def test_fresh_platformio_environment_requires_an_empty_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            core = root / "core"
+            environment = verify.fresh_platformio_environment(core)
+            self.assertEqual(
+                environment["PLATFORMIO_CORE_DIR"], str(core.resolve())
+            )
+            (core / "existing").write_bytes(b"x")
+            with self.assertRaisesRegex(ValueError, "not empty"):
+                verify.fresh_platformio_environment(core)
+
+    def test_windows_toolchain_preflight_is_bounded_and_retries_first_use(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            core = Path(temporary) / "core"
+            compiler = (
+                core
+                / "packages/toolchain-xtensa-esp32/bin/xtensa-esp32-elf-g++.exe"
+            )
+            compiler.parent.mkdir(parents=True)
+            compiler.write_bytes(b"fixture")
+            calls = 0
+
+            def compile_fixture(arguments, **_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    Path(arguments[-1]).write_bytes(b"object")
+                    return SimpleNamespace(returncode=0, stderr="")
+                return SimpleNamespace(returncode=1, stderr="not ready")
+
+            with mock.patch.object(verify.subprocess, "run", side_effect=compile_fixture):
+                with mock.patch.object(verify.time, "sleep"):
+                    verify.preflight_windows_toolchain(
+                        core, {"PLATFORMIO_CORE_DIR": str(core)}, windows=True
+                    )
+            self.assertEqual(calls, 2)
 
 
 if __name__ == "__main__":
