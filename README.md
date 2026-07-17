@@ -236,6 +236,11 @@ the oldest buffered sample is discarded. The queue is intentionally volatile.
 
 `NivaloPinMap` replaces fixed SWD and NivaloLink SPI constants. Defaults preserve
 the original board wiring, while products can supply their own map before begin.
+Bridge builds send a payload-bounded, identifier-free NivaloLink HELLO at link
+startup and every 30 seconds. This lets a secondary MCU re-establish protocol
+identity after either side resets without waiting for a cloud command. The
+existing 30-second heartbeat remains separate; both exchanges use the same
+CRC-checked fixed frame transport.
 
 ## Signed firmware and recovery
 

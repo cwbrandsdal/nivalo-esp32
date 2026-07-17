@@ -36,6 +36,11 @@ def main() -> None:
     assert "boolean NivaloDevice::beginMqtt" in lifecycle
     assert "void NivaloDevice::drainNivaloLink" in link
     assert "void NivaloDevice::handleNivaloLinkFrame" in link
+    assert 'exchange(NIVALO_LINK_FRAME_HELLO' in link
+    assert 'hello["protocol"] = "NivaloLink"' in link
+    assert 'hello["transport"] = "spi-master"' in link
+    assert "_link.helloPending = false" in link
+    assert "bool helloPending = true" in (ROOT / "src/NivaloLinkManager.h").read_text()
     assert "NivaloConnection _connection" in header
     assert "NivaloProtocol _protocol" in header
     assert "NivaloLinkManager _link" in header
