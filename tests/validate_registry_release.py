@@ -34,6 +34,8 @@ def expect_stage_rejected(stage: Path) -> None:
 
 
 def main() -> None:
+    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
+    assert "* text=auto eol=lf" in attributes.splitlines()
     device_identity = release.release_identity("device")
     dap_identity = release.release_identity("dap")
     assert release.validate("device", device_identity["tag"]) == device_identity["version"]
@@ -92,6 +94,8 @@ def main() -> None:
         "registry-publication",
         "--no-interactive",
         "verify_registry_archives.py",
+        "pack_registry_archive.py",
+        "--fresh-core-dir",
         "NivaloRuntimeProvisioning.ino",
         "arduino-lint_1.3.0_Linux_64bit.tar.gz",
         "181671ca174988f2601e1cdf2b40a552682db8eaa047de33117e67e70338b63e",

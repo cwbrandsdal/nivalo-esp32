@@ -64,6 +64,7 @@ jobs:
       - name: Validate registry release readiness
         run: |
           python tests/validate_registry_release.py
+          python -m unittest discover -s tests -p 'test_pack_registry_archive.py'
           python -m unittest discover -s tests -p 'test_verify_registry_archives.py'
       - name: Validate Arduino library specification
         run: |
@@ -108,11 +109,12 @@ jobs:
           python scripts/prepare_registry_release.py --package device --tag "$device_tag" --dap-owner nivalo-ci --output .release-stage
           python scripts/prepare_registry_release.py --package dap --tag "$dap_tag" --output .release-stage
           mkdir -p .release-archives
-          pio pkg pack .release-stage/device --output ".release-archives/$device_archive"
-          pio pkg pack .release-stage/dap --output ".release-archives/$dap_archive"
+          python scripts/pack_registry_archive.py .release-stage/device --output ".release-archives/$device_archive"
+          python scripts/pack_registry_archive.py .release-stage/dap --output ".release-archives/$dap_archive"
           python scripts/verify_registry_archives.py \
             --device ".release-archives/$device_archive" \
-            --dap ".release-archives/$dap_archive"
+            --dap ".release-archives/$dap_archive" \
+            --fresh-core-dir "$RUNNER_TEMP/nivalo-registry-platformio-core"
 
   registry-portability:
     runs-on: windows-latest
@@ -121,7 +123,28 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
+      - name: Install immutable PlatformIO verifier
+        run: python -m pip install --disable-pip-version-check platformio==6.1.19
       - name: Validate registry tooling on Windows
         run: |
           python tests/validate_registry_release.py
+          python -m unittest discover -s tests -p 'test_pack_registry_archive.py'
           python -m unittest discover -s tests -p 'test_verify_registry_archives.py'
+      - name: Build exact registry archives from an empty Windows cache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $deviceTag = python scripts/prepare_registry_release.py --package device --identity-field tag
+          $dapTag = python scripts/prepare_registry_release.py --package dap --identity-field tag
+          $deviceArchive = python scripts/prepare_registry_release.py --package device --identity-field archive
+          $dapArchive = python scripts/prepare_registry_release.py --package dap --identity-field archive
+          python scripts/prepare_registry_release.py --package device --tag $deviceTag --dap-owner nivalo-ci --output .release-stage
+          python scripts/prepare_registry_release.py --package dap --tag $dapTag --output .release-stage
+          New-Item -ItemType Directory -Path .release-archives | Out-Null
+          python scripts/pack_registry_archive.py .release-stage/device --output ".release-archives/$deviceArchive"
+          python scripts/pack_registry_archive.py .release-stage/dap --output ".release-archives/$dapArchive"
+          python scripts/verify_registry_archives.py `
+            --device ".release-archives/$deviceArchive" `
+            --dap ".release-archives/$dapArchive" `
+            --fresh-core-dir "$env:RUNNER_TEMP/p"
