@@ -6,6 +6,14 @@ Its PlatformIO environment targets `COM6` and a `115200` baud monitor. Building
 does not authorize upload, reset, serial access, credential rotation, or a live
 command/OTA operation.
 
+For the factory-claim and serial-provisioning cases, build the versioned
+`examples/Esp32Only` application with the
+`nodemcu-32s-phase1-bench` environment. It pins the connected original ESP32
+bench board and `COM6` but remains a direct-flash application output, not an F11
+browser artifact. Use an ignored `include/nivalo_config.h` to select isolated
+staging and the explicit evaluation-only unencrypted-NVS policy; keep developer
+fixtures disabled and never compile Wi-Fi, MQTT, or claim values into it.
+
 Never paste Wi-Fi, MQTT, claim, signing-private-key, or token values into the
 evidence record. Record stable identifiers, timestamps, hashes, and sanitized
 outcomes instead.

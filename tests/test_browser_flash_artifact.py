@@ -82,6 +82,20 @@ def inspect_test_artifact(image: bytes) -> dict[str, object]:
 
 
 class BrowserFlashArtifactTests(unittest.TestCase):
+    def test_nodemcu_phase1_bench_is_direct_flash_only(self) -> None:
+        platformio = (
+            ROOT / "examples" / "Esp32Only" / "platformio.ini"
+        ).read_text(encoding="utf-8")
+        section = platformio.split("[env:nodemcu-32s-phase1-bench]", 1)[1]
+        section = section.split("\n[env:", 1)[0]
+        self.assertIn("extends = env:featheresp32", section)
+        self.assertIn("board = nodemcu-32s", section)
+        self.assertIn("upload_port = COM6", section)
+        self.assertIn("monitor_port = COM6", section)
+        self.assertNotIn("NIVALO_BROWSER_FLASH_ARTIFACT", section)
+        self.assertNotIn("board_build.partitions", section)
+        self.assertEqual(platformio.count("-DNIVALO_BROWSER_FLASH_ARTIFACT=1"), 1)
+
     def test_browser_build_excludes_ignored_local_configuration(self) -> None:
         source = (ROOT / "examples" / "Esp32Only" / "src" / "main.cpp").read_text(
             encoding="utf-8"
