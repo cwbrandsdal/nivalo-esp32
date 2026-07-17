@@ -7,9 +7,11 @@ flasher. It targets an original Adafruit Feather ESP32 with an
 ESP32 silicon variant, another carrier board, or another flash size requires a
 separate reviewed descriptor and artifact; do not broaden this build.
 
-The regular `featheresp32` and bridge environments do not define
-`NIVALO_BROWSER_FLASH_ARTIFACT`, do not embed the descriptor, and remain
-application-only PlatformIO outputs.
+The regular `featheresp32`, direct-flash `nodemcu-32s-phase1-bench`, and bridge
+environments do not define `NIVALO_BROWSER_FLASH_ARTIFACT`, do not embed the
+descriptor, and remain application-only PlatformIO outputs. In particular,
+the NodeMCU bench build must never be offered through the browser-flash trust
+map as if it were the separately described Feather artifact.
 
 ## Evaluation storage policy
 
