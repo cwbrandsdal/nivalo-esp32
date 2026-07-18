@@ -77,8 +77,10 @@ def main() -> None:
     assert not list(ROOT.glob("examples/**/patch_adafruit_dap_stm32.py"))
     assert 'Serial.println(doc["payload"]' not in all_device_sources
     assert "Serial.print((char)message[i])" not in all_device_sources
-    assert 'else if (payload.length() > 0U)' in command
-    assert 'stmCommand.createNestedObject("payload")' in command
+    assert 'else if (doc["payload"].is<const char *>())' in command
+    assert 'serializeJson(arguments, forwardedCommand)' in command
+    assert 'forwardedCommand += ",\\\"payload\\\":"' in command
+    assert 'forwardedCommand.length() > NIVALO_LINK_MAX_PAYLOAD' in command
     for bridge_path in [ROOT / "examples/Esp32Stm32Bridge/src/main.cpp"]:
         bridge = bridge_path.read_text()
         assert len(bridge.splitlines()) <= 140
