@@ -71,3 +71,15 @@ else()
 endif()
 
 add_test(NAME nivalo_provisioning_time_policy_tests COMMAND nivalo_provisioning_time_policy_tests)
+
+add_executable(nivalo_nivalolink_receive_sequence_tests test_nivalolink_receive_sequence.cpp)
+target_include_directories(nivalo_nivalolink_receive_sequence_tests PRIVATE ../../src)
+target_compile_features(nivalo_nivalolink_receive_sequence_tests PRIVATE cxx_std_11)
+
+if(MSVC)
+    target_compile_options(nivalo_nivalolink_receive_sequence_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(nivalo_nivalolink_receive_sequence_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+endif()
+
+add_test(NAME nivalo_nivalolink_receive_sequence_tests COMMAND nivalo_nivalolink_receive_sequence_tests)
