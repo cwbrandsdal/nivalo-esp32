@@ -194,7 +194,19 @@ size_t NivaloDevice::publishEvent(const char *name, const char *data, const char
     addFirmwareTargets(doc["firmware"]);
     doc["payload"]["name"] = name;
     doc["payload"]["severity"] = severity;
-    doc["payload"]["raw"] = data;
+    StaticJsonDocument<1024> parsedData;
+    const char *eventDataJson = data;
+    bool structuredData = eventDataJson != NULL && !deserializeJson(parsedData, eventDataJson);
+    if (structuredData)
+    {
+        // Preserve structured device events as canonical data. The API keeps
+        // this field for every event while raw envelopes are sampled.
+        doc["payload"]["data"] = serialized(eventDataJson);
+    }
+    else
+    {
+        doc["payload"]["raw"] = data;
+    }
     serializeJson(doc, output);
 
     return _connection.publish(_eventsTopic, output.c_str()) ? 1U : 0U;

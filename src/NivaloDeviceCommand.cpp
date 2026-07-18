@@ -7,7 +7,11 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
     Serial.print("Message arrived on topic: ");
     Serial.println(topic);
     DynamicJsonDocument doc(2048);
-    DeserializationError err = deserializeJson(doc, message, length);
+    // PubSubClient owns and reuses `message`. Treat it as read-only so
+    // ArduinoJson copies strings into `doc`; otherwise status publishes made
+    // later in this callback can overwrite zero-copy command arguments.
+    const char *commandJson = reinterpret_cast<const char *>(message);
+    DeserializationError err = deserializeJson(doc, commandJson, length);
     if (err)
     {
         Serial.print("MQTT command JSON parse failed: ");
@@ -95,29 +99,37 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
     else if (commandName.length() > 0)
     {
 #if NIVALO_HAS_SECONDARY_MCU
-        StaticJsonDocument<2048> stmCommand;
+        StaticJsonDocument<512> stmCommand;
         stmCommand["commandId"] = commandId;
         stmCommand["command"] = commandName;
         if (requestedBy != NULL && strlen(requestedBy) > 0U)
         {
             stmCommand["requestedBy"] = requestedBy;
         }
+        String forwardedCommand;
+        serializeJson(stmCommand, forwardedCommand);
+        if (forwardedCommand.endsWith("}"))
+        {
+            forwardedCommand.remove(forwardedCommand.length() - 1U);
+        }
+        forwardedCommand += ",\"payload\":";
         if (!arguments.isNull())
         {
-            stmCommand["payload"] = arguments;
+            // Serialize the source value straight into the final frame. Moving
+            // a nested value between ArduinoJson documents can preserve only
+            // an empty container on the ESP32 toolchain used by this bridge.
+            serializeJson(arguments, forwardedCommand);
         }
-        else if (payload.length() > 0U)
+        else if (doc["payload"].is<const char *>())
         {
-            stmCommand["payload"] = payload;
+            serializeJson(doc["payload"], forwardedCommand);
         }
         else
         {
-            stmCommand.createNestedObject("payload");
+            forwardedCommand += "{}";
         }
-
-        String forwardedCommand;
-        serializeJson(stmCommand, forwardedCommand);
-        if (stmCommand.overflowed())
+        forwardedCommand += "}";
+        if (stmCommand.overflowed() || forwardedCommand.length() > NIVALO_LINK_MAX_PAYLOAD)
         {
             queueEventReport("mcu.command.forward_failed", "command JSON exceeds bridge capacity", "warning");
             if (commandId.length() > 0)
