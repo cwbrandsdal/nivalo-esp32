@@ -106,9 +106,13 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
         {
             stmCommand["payload"] = arguments;
         }
-        else
+        else if (payload.length() > 0U)
         {
             stmCommand["payload"] = payload;
+        }
+        else
+        {
+            stmCommand.createNestedObject("payload");
         }
 
         String forwardedCommand;
@@ -157,4 +161,3 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
 
     Serial.println();
 }
-
