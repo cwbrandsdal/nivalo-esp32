@@ -54,6 +54,7 @@ bool NivaloLinkSpiTransport::begin(const NivaloLinkPinMap &pins)
     pinMode(_pins.dataReady, INPUT_PULLDOWN);
     memset(_txFrame, 0, sizeof(_txFrame));
     memset(_rxFrame, 0, sizeof(_rxFrame));
+    _receiveSequence.reset();
     _started = true;
     _paused = false;
     setLastError("");
@@ -81,6 +82,7 @@ bool NivaloLinkSpiTransport::exchange(uint8_t type, const char *jsonPayload, Niv
     if (received != NULL)
     {
         received->valid = false;
+        received->duplicate = false;
         received->type = NIVALO_LINK_FRAME_IDLE;
         received->seq = 0;
         received->ack = 0;
@@ -174,7 +176,7 @@ void NivaloLinkSpiTransport::buildFrame(uint8_t type, const char *jsonPayload)
     _txFrame[NIVALO_LINK_FLAGS_OFFSET] = 0U;
     _txFrame[NIVALO_LINK_HEADER_LEN_OFFSET] = NIVALO_LINK_HEADER_SIZE;
     writeLe16(_txFrame, NIVALO_LINK_SEQ_OFFSET, _nextSeq++);
-    writeLe16(_txFrame, NIVALO_LINK_ACK_OFFSET, _lastReceivedSeq);
+    writeLe16(_txFrame, NIVALO_LINK_ACK_OFFSET, _receiveSequence.acknowledgment());
     writeLe16(_txFrame, NIVALO_LINK_PAYLOAD_LEN_OFFSET, (uint16_t)payloadLength);
     writeLe16(_txFrame, NIVALO_LINK_RESERVED16_OFFSET, 0U);
     writeLe32(_txFrame, NIVALO_LINK_CRC_OFFSET, 0UL);
@@ -198,6 +200,7 @@ bool NivaloLinkSpiTransport::parseFrame(NivaloLinkReceivedFrame *received)
     }
 
     received->valid = false;
+    received->duplicate = false;
     received->payload[0] = '\0';
 
     if (parseFrameAt(received, 0U))
@@ -263,6 +266,7 @@ bool NivaloLinkSpiTransport::parseFrameAt(NivaloLinkReceivedFrame *received, siz
     received->valid = true;
     received->type = frame[NIVALO_LINK_TYPE_OFFSET];
     received->seq = readLe16(frame, NIVALO_LINK_SEQ_OFFSET);
+    received->duplicate = !_receiveSequence.observe(received->seq);
     received->ack = readLe16(frame, NIVALO_LINK_ACK_OFFSET);
     received->payloadLength = payloadLength;
     if (payloadLength > 0U)
@@ -270,7 +274,6 @@ bool NivaloLinkSpiTransport::parseFrameAt(NivaloLinkReceivedFrame *received, siz
         memcpy(received->payload, &frame[NIVALO_LINK_HEADER_SIZE], payloadLength);
     }
     received->payload[payloadLength] = '\0';
-    _lastReceivedSeq = received->seq;
     setLastError("");
     return true;
 }

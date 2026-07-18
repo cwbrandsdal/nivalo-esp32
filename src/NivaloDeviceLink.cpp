@@ -100,7 +100,7 @@ void NivaloDevice::publishNivaloLinkHeartbeat(const char *payload)
 
 void NivaloDevice::handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame)
 {
-    if (!frame.valid || frame.type == NIVALO_LINK_FRAME_IDLE || frame.type == NIVALO_LINK_FRAME_POLL)
+    if (!frame.valid || frame.duplicate || frame.type == NIVALO_LINK_FRAME_IDLE || frame.type == NIVALO_LINK_FRAME_POLL)
     {
         return;
     }

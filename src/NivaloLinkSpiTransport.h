@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <SPI.h>
+#include "NivaloLinkReceiveSequence.h"
 
 static constexpr size_t NIVALO_LINK_SPI_FRAME_SIZE = 1024U;
 static constexpr size_t NIVALO_LINK_HEADER_SIZE = 24U;
@@ -27,6 +28,7 @@ enum NivaloLinkFrameType : uint8_t
 struct NivaloLinkReceivedFrame
 {
     bool valid;
+    bool duplicate;
     uint8_t type;
     uint16_t seq;
     uint16_t ack;
@@ -66,7 +68,7 @@ private:
     bool _started = false;
     bool _paused = false;
     uint16_t _nextSeq = 1;
-    uint16_t _lastReceivedSeq = 0;
+    NivaloLinkReceiveSequence _receiveSequence;
     const char *_lastError = "";
     uint8_t _txFrame[NIVALO_LINK_SPI_FRAME_SIZE];
     uint8_t _rxFrame[NIVALO_LINK_SPI_FRAME_SIZE];
