@@ -10,7 +10,7 @@ static constexpr size_t DefinitionsJsonCapacity = 3072U;
 static constexpr unsigned long PeriodicPollMs = 1000UL;
 static constexpr unsigned long HelloMs = 30000UL;
 static constexpr unsigned long HeartbeatMs = 30000UL;
-static constexpr unsigned long InvalidFrameReportMs = 10000UL;
+static constexpr unsigned long InvalidFrameReportMs = 60000UL;
 static constexpr unsigned long InvalidFrameBackoffMs = 250UL;
 static constexpr size_t DrainLimit = 8U;
 
@@ -375,22 +375,24 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
             _link.backoffUntil = millis() + InvalidFrameBackoffMs;
 
             unsigned long reportNow = millis();
-            if (forcePoll || (reportNow - _link.lastInvalidFrameReport) >= InvalidFrameReportMs)
+            bool firstInvalidFrameReport = _link.lastInvalidFrameReport == 0U;
+            if (firstInvalidFrameReport || (reportNow - _link.lastInvalidFrameReport) >= InvalidFrameReportMs)
             {
                 char rxPrefix[25];
-                char message[160];
+                char diagnosticJson[256];
                 _link.transport().formatLastRxPrefix(rxPrefix, sizeof(rxPrefix), 12U);
-                snprintf(
-                    message,
-                    sizeof(message),
-                    "%s count=%lu dataReady=%s rx=%s",
-                    _link.transport().lastError(),
-                    (unsigned long)_link.invalidFrameCount,
-                    _link.transport().dataReady() ? "true" : "false",
-                    rxPrefix);
-                queueEventReport("esp32.nivalolink.frame_invalid", message, "warning");
-                _link.lastInvalidFrameReport = reportNow;
-                _link.invalidFrameCount = 0;
+                StaticJsonDocument<256> diagnostic;
+                diagnostic["error"] = _link.transport().lastError();
+                diagnostic["count"] = _link.invalidFrameCount;
+                diagnostic["dataReady"] = _link.transport().dataReady();
+                diagnostic["rxPrefix"] = rxPrefix;
+                serializeJson(diagnostic, diagnosticJson, sizeof(diagnosticJson));
+
+                if (queueEventReport("esp32.nivalolink.frame_invalid", diagnosticJson, "warning"))
+                {
+                    _link.lastInvalidFrameReport = reportNow;
+                    _link.invalidFrameCount = 0;
+                }
             }
             break;
         }
