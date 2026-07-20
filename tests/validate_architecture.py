@@ -40,6 +40,16 @@ def main() -> None:
     assert 'hello["protocol"] = "NivaloLink"' in link
     assert 'hello["transport"] = "spi-master"' in link
     assert "_link.helloPending = false" in link
+    assert "InvalidFrameReportMs = 60000UL" in link
+    assert 'diagnostic["error"] = _link.transport().lastError();' in link
+    assert 'diagnostic["count"] = _link.invalidFrameCount;' in link
+    assert 'diagnostic["dataReady"] = _link.transport().dataReady();' in link
+    assert 'diagnostic["rxPrefix"] = rxPrefix;' in link
+    assert 'queueEventReport("esp32.nivalolink.frame_invalid", diagnosticJson, "warning")' in link
+    assert "forcePoll || (reportNow - _link.lastInvalidFrameReport)" not in link
+    assert link.index(
+        'queueEventReport("esp32.nivalolink.frame_invalid", diagnosticJson, "warning")'
+    ) < link.index("_link.invalidFrameCount = 0;")
     assert "bool helloPending = true" in (ROOT / "src/NivaloLinkManager.h").read_text()
     assert "NivaloConnection _connection" in header
     assert "NivaloProtocol _protocol" in header

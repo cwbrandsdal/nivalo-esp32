@@ -212,6 +212,13 @@ state live in separate implementation units. `NivaloDevice` remains the public
 facade, while mutable runtime state—including the NeoPixel driver—is owned by
 each device instance.
 
+NivaloLink invalid SPI frames are aggregated into at most one
+`esp32.nivalolink.frame_invalid` event per minute after the initial report. The
+event uses structured `data` with `error`, interval `count`, `dataReady`, and a
+12-byte hexadecimal `rxPrefix`, so the platform retains actionable diagnostics
+without persisting sampled raw MQTT envelopes or emitting one event per failed
+poll.
+
 Connection management is non-blocking: failed attempts use exponential backoff
 from 1 to 60 seconds plus up to 25% random jitter. MQTT connects with a retained
 QoS 1 offline Last Will. SNTP is started during configuration and the client
