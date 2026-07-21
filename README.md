@@ -305,6 +305,11 @@ pinned Espressif32 platform. ESP32 CI validates only this repository and the
 pinned protocol contracts. The examples repository owns its cross-repository
 builds against one immutable ESP32 commit, avoiding a circular CI dependency.
 
+CI runs for pull requests and for pushes to `main`; feature-branch pushes are
+not run separately from their pull requests. The Windows registry-portability
+lane is limited to changes that can affect the packaged device or maintained
+DAP archives. Manual dispatch remains a fail-safe full run.
+
 No remote or package has been created. Until publication, external bridge
 consumers must supply the fork explicitly rather than relying on registry
 dependency resolution.
