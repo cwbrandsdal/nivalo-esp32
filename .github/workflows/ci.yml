@@ -2,6 +2,8 @@ name: CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
   workflow_dispatch:
 
@@ -17,6 +19,77 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    outputs:
+      registry_portability: ${{ steps.classify.outputs.registry_portability }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+      - name: Classify registry portability changes
+        id: classify
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          CURRENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          force_all=false
+          paths=''
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              force_all=true
+              ;;
+            pull_request)
+              if git cat-file -e "$PR_BASE_SHA^{commit}" 2>/dev/null && \
+                 git cat-file -e "$PR_HEAD_SHA^{commit}" 2>/dev/null; then
+                paths=$(git diff --name-only --no-renames --diff-filter=ACDMRTUXB \
+                  "$PR_BASE_SHA...$PR_HEAD_SHA")
+              else
+                force_all=true
+              fi
+              ;;
+            push)
+              if [[ -z "$BEFORE_SHA" || "$BEFORE_SHA" =~ ^0+$ ]] || \
+                 ! git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+                force_all=true
+              else
+                paths=$(git diff --name-only --no-renames --diff-filter=ACDMRTUXB \
+                  "$BEFORE_SHA" "$CURRENT_SHA")
+              fi
+              ;;
+            *)
+              force_all=true
+              ;;
+          esac
+
+          if [[ "$force_all" == false && -z "$paths" ]]; then
+            force_all=true
+          fi
+
+          registry_portability=$force_all
+          while IFS= read -r path; do
+            [[ -z "$path" ]] && continue
+            case "$path" in
+              .github/workflows/ci.yml|library.json|library.properties|README.md|LICENSE|src/*|examples/*|third_party/adafruit-dap-nivalo/*|scripts/prepare_registry_release.py|scripts/pack_registry_archive.py|scripts/verify_registry_archives.py|tests/validate_registry_release.py|tests/test_pack_registry_archive.py|tests/test_verify_registry_archives.py)
+                registry_portability=true
+                ;;
+            esac
+          done <<< "$paths"
+
+          echo "registry_portability=$registry_portability" >> "$GITHUB_OUTPUT"
+          {
+            echo '## Registry portability classification'
+            echo
+            echo "- Run Windows portability: $registry_portability"
+          } >> "$GITHUB_STEP_SUMMARY"
+
   host-tests:
     runs-on: ubuntu-latest
     steps:
@@ -119,6 +192,8 @@ jobs:
             --fresh-core-dir "$RUNNER_TEMP/nivalo-registry-platformio-core"
 
   registry-portability:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.registry_portability == 'true') }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
