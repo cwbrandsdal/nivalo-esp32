@@ -40,6 +40,16 @@ Do not add Arduino, GitHub, or PlatformIO credentials to source, workflow inputs
 release archives, or logs. The workflow maps the selected named token to
 `PLATFORMIO_AUTH_TOKEN` only inside the publish step.
 
+Before changing repository visibility or publishing a tag, scan the complete
+Git history with Gitleaks. The repository configuration extends the default
+rules and permits only two exact synthetic values extracted from deterministic
+test fixtures. A clean result is required; do not add broad path or rule
+exclusions.
+
+```powershell
+gitleaks git .
+```
+
 ## Dry run
 
 Before creating a tag, run locally:

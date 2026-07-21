@@ -1,0 +1,15 @@
+title = "Nivalo ESP32 secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Exact synthetic public values used by deterministic tests"
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef$''',
+  '''^0f007385b6f9d4b7eeb2748605afe1a984a0a3bfa3f014d09e2a784ce9e5cd1a$'''
+]
