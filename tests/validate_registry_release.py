@@ -104,6 +104,13 @@ def main() -> None:
         "publish=false",
     ):
         assert required in workflow
+    lint_step = "- name: Require Arduino Library Manager submission compliance"
+    provenance_step = "- name: Validate firmware and release provenance"
+    release_stage = "--output .release-stage"
+    assert workflow.count(lint_step) == 1
+    assert workflow.count("--compliance strict --library-manager submit") == 1
+    assert workflow.index(lint_step) < workflow.index(provenance_step)
+    assert workflow.index(lint_step) < workflow.index(release_stage)
     assert "release create" not in workflow and "git push" not in workflow
     assert "git describe" not in workflow
     assert "DEVICE_TOKEN" not in workflow and "DAP_TOKEN" not in workflow
