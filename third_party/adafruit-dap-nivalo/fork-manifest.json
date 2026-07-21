@@ -17,9 +17,10 @@
     "platformioManifest": "source/library.json",
     "releaseTag": "dap-v1.8.3-nivalo.1"
   },
+  "sourceRepository": "https://github.com/cwbrandsdal/Nivalo_Adafruit_DAP",
   "localReplacementPaths": {
     "libraryExample": "symlink://../../third_party/adafruit-dap-nivalo/source",
     "externalExample": "symlink://../../nivalo-esp32/third_party/adafruit-dap-nivalo/source"
   },
-  "activationGate": "Repository builds use the reviewed local source. A remote or registry publication still requires explicit owner approval."
+  "activationGate": "Repository builds use the reviewed local source. PlatformIO publication remains guarded by the registry-publication environment and exact immutable tag workflow."
 }

@@ -1,6 +1,7 @@
 # Nivalo maintained Adafruit DAP fork
 
-This directory contains Nivalo's active repository-local Adafruit DAP fork.
+This directory contains Nivalo's active Adafruit DAP fork. The maintained
+source repository is https://github.com/cwbrandsdal/Nivalo_Adafruit_DAP.
 `source/` is an import of official tag `1.8.3` at commit
 `8ca356d92e73d0d1005534030849e7ca37324805`, including the upstream BSD license.
 `upstream-provenance.json` records normalized upstream hashes and the two files
@@ -13,9 +14,9 @@ The maintained delta is deliberately small:
    external dependency constraints.
 
 Both bridge projects resolve this source through the symlink paths in
-`fork-manifest.json`. The Nivalo library metadata omits a registry dependency
-until this fork is published; bridge consumers must supply the fork explicitly.
-No remote or package has been created.
+`fork-manifest.json`. The Nivalo library metadata omits an unconditional
+registry dependency because standalone devices do not compile the bridge.
+Bridge consumers must install the exact matching DAP release explicitly.
 
 For an upstream refresh, import the new reviewed tag, update provenance hashes,
 reapply or retire the delta, and pass drift validation plus both bridge builds.
@@ -25,5 +26,6 @@ TinyUSB's MIDI dependency. `SD` is supplied locally by the pinned Espressif32
 platform rather than resolved as a floating registry package.
 
 `source/library.json` is the prepared PlatformIO manifest. Publication remains
-guarded by `docs/registry-release.md`; this directory layout is not itself an
-Arduino Library Manager submission.
+guarded by `docs/registry-release.md`; the public source repository and immutable
+release tags do not by themselves publish a PlatformIO package or submit an
+Arduino Library Manager entry.
