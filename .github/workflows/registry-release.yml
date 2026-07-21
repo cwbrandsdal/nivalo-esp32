@@ -31,6 +31,10 @@ on:
 permissions:
   contents: read
 
+env:
+  NIVALO_PROTOCOL_REF: cb25ab0997c02bc7c16f757e685ef209bac22d34
+  NIVALO_PROTOCOL_DIR: ${{ github.workspace }}/.ci/nivalo-protocol
+
 concurrency:
   group: registry-release-${{ github.ref }}-${{ inputs.package || 'tag' }}
   cancel-in-progress: false
@@ -51,6 +55,20 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Require immutable private dependency key
+        env:
+          NIVALO_PROTOCOL_DEPLOY_KEY: ${{ secrets.NIVALO_PROTOCOL_DEPLOY_KEY }}
+        run: |
+          [[ "$NIVALO_PROTOCOL_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ -n "$NIVALO_PROTOCOL_DEPLOY_KEY" ]]
+      - name: Check out authoritative protocol contracts
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: cwbrandsdal/nivalo-protocol
+          ref: ${{ env.NIVALO_PROTOCOL_REF }}
+          path: .ci/nivalo-protocol
+          ssh-key: ${{ secrets.NIVALO_PROTOCOL_DEPLOY_KEY }}
+          persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
