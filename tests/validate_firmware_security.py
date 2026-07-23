@@ -91,6 +91,9 @@ def main() -> None:
     assert 'Serial.println(firmwareUrl)' not in flash_handler
     assert 'Serial.println(signatureValue)' not in flash_handler
     assert "http.end()" not in flash_handler
+    download_loop = flash_handler[flash_handler.index("while (http.connected()") : flash_handler.index("uint8_t actualSha256")]
+    assert "if (_watchdogEnabled)" in download_loop
+    assert "esp_task_wdt_reset();" in download_loop
     assert "setPaused(false)" not in flash_handler
     assert "_ota.releasePins()" not in flash_handler
     assert flash_handler.count("otaSession.closeDownload()") == 2

@@ -6,6 +6,7 @@
 #include <HTTPClient.h>
 #include <SPIFFS.h>
 #include <Update.h>
+#include <esp_task_wdt.h>
 #include <mbedtls/sha256.h>
 
 #if NIVALO_HAS_SECONDARY_MCU
@@ -436,6 +437,15 @@ void NivaloDevice::handleFirmwareCommand(const String &commandId, JsonObject arg
 
                         while (http.connected() && (len > 0 || len == -1))
                         {
+                            // Firmware downloads can take longer than the configured loop-task
+                            // watchdog window on constrained links. This handler runs synchronously
+                            // from loop(), so service the same watchdog that NivaloDevice::loop()
+                            // normally resets until control returns to the application.
+                            if (_watchdogEnabled)
+                            {
+                                esp_task_wdt_reset();
+                            }
+
                             // get available data size
                             size_t size = stream->available();
 
