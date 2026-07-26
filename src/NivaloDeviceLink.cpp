@@ -7,7 +7,6 @@ namespace
 {
 static constexpr size_t UartMessageJsonCapacity = 2048U;
 static constexpr size_t DefinitionsJsonCapacity = 3072U;
-static constexpr unsigned long PeriodicPollMs = 1000UL;
 static constexpr unsigned long HelloMs = 30000UL;
 static constexpr unsigned long HeartbeatMs = 30000UL;
 static constexpr unsigned long InvalidFrameReportMs = 60000UL;
@@ -295,7 +294,7 @@ void NivaloDevice::handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame)
     publishEvent(eventName, frame.payloadLength > 0U ? frame.payload : "{}", "info");
 }
 
-void NivaloDevice::drainNivaloLink(bool forcePoll)
+void NivaloDevice::drainNivaloLink()
 {
     if (_link.transport().isPaused())
     {
@@ -305,13 +304,19 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
     unsigned long now = millis();
     bool helloDue = _link.helloPending || (now - _link.lastHello) >= HelloMs;
     bool heartbeatDue = (now - _link.lastHeartbeat) >= HeartbeatMs;
-    bool pollDue = (now - _link.lastPoll) >= PeriodicPollMs;
-    if (!forcePoll && !heartbeatDue && now < _link.backoffUntil)
+    bool pollDue =
+        (now - _link.lastPoll) >= NivaloLinkCommandPollPolicy::FallbackPollMs;
+    bool dataReady = _link.transport().dataReady();
+    if (_link.shouldDeferCommandPoll(now, dataReady))
+    {
+        return;
+    }
+    if (!heartbeatDue && now < _link.backoffUntil)
     {
         return;
     }
 
-    bool shouldDrain = forcePoll || _link.transport().dataReady() || helloDue || heartbeatDue || pollDue;
+    bool shouldDrain = dataReady || helloDue || heartbeatDue || pollDue;
     if (!shouldDrain)
     {
         return;
@@ -322,6 +327,7 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
     {
         NivaloLinkReceivedFrame frame;
         bool sent;
+        _link.notePollStarted();
         if (helloDue)
         {
             StaticJsonDocument<160> hello;
@@ -398,5 +404,5 @@ void NivaloDevice::drainNivaloLink(bool forcePoll)
         }
 
         drained++;
-    } while ((forcePoll || _link.transport().dataReady()) && drained < DrainLimit);
+    } while (_link.transport().dataReady() && drained < DrainLimit);
 }

@@ -225,7 +225,7 @@ private:
     bool queueCommandAckReport(const char *commandId, const char *status, const char *message, float progress = -1);
     bool queueEventReport(const char *name, const char *data, const char *severity = "info");
     void drainQueuedReports();
-    void drainNivaloLink(bool forcePoll = false);
+    void drainNivaloLink();
     void handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame);
     void publishNivaloLinkHeartbeat(const char *payload);
     bool dispatchSdkCommand(const char *commandId, const String &commandName, const String &arguments);

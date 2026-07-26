@@ -36,6 +36,14 @@ def main() -> None:
     assert "boolean NivaloDevice::beginMqtt" in lifecycle
     assert "void NivaloDevice::drainNivaloLink" in link
     assert "void NivaloDevice::handleNivaloLinkFrame" in link
+    assert "drainNivaloLink(true)" not in command
+    assert "_link.noteCommandExchange(millis());" in command
+    assert "_link.shouldDeferCommandPoll(now, dataReady)" in link
+    assert "_link.notePollStarted();" in link
+    assert "NivaloLinkCommandPollPolicy _commandPollPolicy" in (
+        ROOT / "src/NivaloLinkManager.h"
+    ).read_text()
+    assert (ROOT / "tests/host/test_nivalolink_command_poll_policy.cpp").exists()
     assert 'exchange(NIVALO_LINK_FRAME_HELLO' in link
     assert 'hello["protocol"] = "NivaloLink"' in link
     assert 'hello["transport"] = "spi-master"' in link

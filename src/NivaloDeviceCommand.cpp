@@ -143,6 +143,7 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
 
         if (sent)
         {
+            _link.noteCommandExchange(millis());
             queueEventReport("mcu.command.forwarded", forwardedCommand.c_str());
             if (commandId.length() > 0)
             {
@@ -152,7 +153,6 @@ void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
             {
                 handleNivaloLinkFrame(immediateFrame);
             }
-            drainNivaloLink(true);
         }
         else
         {
