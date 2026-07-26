@@ -219,6 +219,10 @@ event uses structured `data` with `error`, interval `count`, `dataReady`, and a
 without persisting sampled raw MQTT envelopes or emitting one event per failed
 poll.
 
+After forwarding a command, the bridge waits for the secondary MCU's
+`DATA_READY` signal before polling for response frames. The existing one-second
+periodic poll remains the bounded fallback if that signal is unavailable.
+
 Connection management is non-blocking: failed attempts use exponential backoff
 from 1 to 60 seconds plus up to 25% random jitter. MQTT connects with a retained
 QoS 1 offline Last Will. SNTP is started during configuration and the client
