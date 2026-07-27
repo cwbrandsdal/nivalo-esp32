@@ -101,3 +101,15 @@ add_test(
     NAME nivalo_nivalolink_command_poll_policy_tests
     COMMAND nivalo_nivalolink_command_poll_policy_tests
 )
+
+add_executable(nivalo_command_result_cache_tests test_command_result_cache.cpp)
+target_include_directories(nivalo_command_result_cache_tests PRIVATE ../../src)
+target_compile_features(nivalo_command_result_cache_tests PRIVATE cxx_std_11)
+
+if(MSVC)
+    target_compile_options(nivalo_command_result_cache_tests PRIVATE /W4 /WX)
+else()
+    target_compile_options(nivalo_command_result_cache_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+endif()
+
+add_test(NAME nivalo_command_result_cache_tests COMMAND nivalo_command_result_cache_tests)

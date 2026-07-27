@@ -9,15 +9,45 @@ bool NivaloSdkRegistry::validName(const char *name) const
 
 bool NivaloSdkRegistry::addFunction(const char *name, NivaloFunctionHandler handler)
 {
+    NivaloFunctionMetadata metadata;
+    return addFunction(name, handler, metadata);
+}
+
+bool NivaloSdkRegistry::addFunction(
+    const char *name,
+    NivaloFunctionHandler handler,
+    const NivaloFunctionMetadata &metadata)
+{
     if (!validName(name) || handler == NULL || _functionCount >= NIVALO_MAX_REGISTERED_FUNCTIONS ||
-        findFunction(name) != NULL)
+        findFunction(name) != NULL || !validFunctionMetadata(metadata))
     {
         return false;
     }
-    _functions[_functionCount].name = name;
-    _functions[_functionCount].handler = handler;
+    NivaloRegisteredFunction &registered = _functions[_functionCount];
+    registered.name = name;
+    registered.displayName = metadata.displayName == NULL ? "" : metadata.displayName;
+    registered.description = metadata.description == NULL ? "" : metadata.description;
+    registered.argumentExample = metadata.argumentExample == NULL ? "" : metadata.argumentExample;
+    registered.returnType = metadata.returnType == NULL ? "" : metadata.returnType;
+    registered.timeoutSeconds = metadata.timeoutSeconds;
+    registered.dangerLevel = metadata.dangerLevel;
+    registered.sortOrder = metadata.sortOrder < 0 ? (int)_functionCount : metadata.sortOrder;
+    registered.handler = handler;
     _functionCount++;
     return true;
+}
+
+bool NivaloSdkRegistry::validFunctionMetadata(const NivaloFunctionMetadata &metadata) const
+{
+    if (metadata.timeoutSeconds < 1U || metadata.timeoutSeconds > 600U ||
+        metadata.dangerLevel == NULL || metadata.dangerLevel[0] == '\0')
+    {
+        return false;
+    }
+    return strcmp(metadata.dangerLevel, "safe") == 0 ||
+           strcmp(metadata.dangerLevel, "operational") == 0 ||
+           strcmp(metadata.dangerLevel, "disruptive") == 0 ||
+           strcmp(metadata.dangerLevel, "dangerous") == 0;
 }
 
 bool NivaloSdkRegistry::addVariable(const char *name, void *reference, NivaloVariableType type, const char *unit)

@@ -10,6 +10,17 @@ static constexpr size_t NIVALO_MAX_REGISTERED_VARIABLES = 12U;
 // success and a negative result on failure. The result is included in the ACK.
 typedef int (*NivaloFunctionHandler)(String argument);
 
+struct NivaloFunctionMetadata
+{
+    const char *displayName = NULL;
+    const char *description = NULL;
+    const char *argumentExample = NULL;
+    const char *returnType = "integer";
+    uint16_t timeoutSeconds = 30U;
+    const char *dangerLevel = "safe";
+    int sortOrder = -1;
+};
+
 enum NivaloCommandResult
 {
     NIVALO_COMMAND_UNHANDLED = 0,
@@ -35,6 +46,13 @@ enum NivaloVariableType
 struct NivaloRegisteredFunction
 {
     String name;
+    String displayName;
+    String description;
+    String argumentExample;
+    String returnType = "integer";
+    String dangerLevel = "safe";
+    uint16_t timeoutSeconds = 30U;
+    int sortOrder = 0;
     NivaloFunctionHandler handler = NULL;
 };
 
@@ -50,6 +68,7 @@ class NivaloSdkRegistry
 {
 public:
     bool addFunction(const char *name, NivaloFunctionHandler handler);
+    bool addFunction(const char *name, NivaloFunctionHandler handler, const NivaloFunctionMetadata &metadata);
     bool addVariable(const char *name, void *reference, NivaloVariableType type, const char *unit);
     void setCommandHandler(NivaloCommandHandler handler);
 
@@ -64,6 +83,7 @@ public:
 
 private:
     bool validName(const char *name) const;
+    bool validFunctionMetadata(const NivaloFunctionMetadata &metadata) const;
     NivaloRegisteredFunction _functions[NIVALO_MAX_REGISTERED_FUNCTIONS];
     NivaloRegisteredVariable _variables[NIVALO_MAX_REGISTERED_VARIABLES];
     size_t _functionCount = 0U;

@@ -63,6 +63,7 @@ static bool parseIpv4Address(const char *host, uint8_t octets[4])
     }
 }
 
+
 static bool isHexDigit(char value)
 {
     return (value >= '0' && value <= '9') ||
@@ -294,7 +295,10 @@ boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
     _firmwareVersion = config.firmwareVersion;
     _hardwareName = config.hardwareName;
     _telemetryBufferCapacity = min((uint8_t)8U, config.telemetryBufferCapacity);
-    _protocol.beginClock(config.primaryNtpServer, config.secondaryNtpServer);
+    if (config.configureClock)
+    {
+        _protocol.beginClock(config.primaryNtpServer, config.secondaryNtpServer);
+    }
 
     snprintf(_telemetryTopic, sizeof(_telemetryTopic), "nivalo/v1/devices/%s/telemetry", _deviceId.c_str());
     snprintf(_stateTopic, sizeof(_stateTopic), "nivalo/v1/devices/%s/state", _deviceId.c_str());
@@ -334,4 +338,3 @@ void NivaloDevice::setColor(NivaloStatusColor color)
         break;
     }
 }
-
