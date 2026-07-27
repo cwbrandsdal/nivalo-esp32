@@ -66,6 +66,7 @@ def main() -> None:
     device = (ROOT / "src/NivaloDevice.cpp").read_text()
     command = (ROOT / "src/NivaloDeviceCommand.cpp").read_text()
     sdk = (ROOT / "src/NivaloDeviceSdk.cpp").read_text()
+    assert "DefinitionsJsonCapacity = 6144U" in sdk
     assert "bool function(const char *name, NivaloFunctionHandler handler)" in header
     assert "const NivaloFunctionMetadata &metadata" in header
     assert "bool configureClock = true;" in header

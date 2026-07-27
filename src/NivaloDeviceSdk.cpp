@@ -4,7 +4,9 @@
 
 namespace
 {
-static constexpr size_t DefinitionsJsonCapacity = 3072U;
+// Rich metadata for all eight standalone functions plus registered variables
+// needs more ArduinoJson arena space than the final serialized MQTT payload.
+static constexpr size_t DefinitionsJsonCapacity = 6144U;
 
 void addFirmwareTargets(JsonVariant firmware)
 {
