@@ -1,5 +1,8 @@
 #include "NivaloCommandResultCache.h"
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cstdio>
 #include <cstring>
