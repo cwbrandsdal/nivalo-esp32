@@ -4,7 +4,9 @@
 
 namespace
 {
-static constexpr size_t DefinitionsJsonCapacity = 3072U;
+// Rich metadata for all eight standalone functions plus registered variables
+// needs more ArduinoJson arena space than the final serialized MQTT payload.
+static constexpr size_t DefinitionsJsonCapacity = 6144U;
 
 void addFirmwareTargets(JsonVariant firmware)
 {
@@ -19,6 +21,19 @@ void addFirmwareTargets(JsonVariant firmware)
 bool NivaloDevice::function(const char *name, NivaloFunctionHandler handler)
 {
     bool registered = _sdkRegistry.addFunction(name, handler);
+    if (registered && _connection.connected() && _deviceId.length() > 0U)
+    {
+        publishDefinitions();
+    }
+    return registered;
+}
+
+bool NivaloDevice::function(
+    const char *name,
+    NivaloFunctionHandler handler,
+    const NivaloFunctionMetadata &metadata)
+{
+    bool registered = _sdkRegistry.addFunction(name, handler, metadata);
     if (registered && _connection.connected() && _deviceId.length() > 0U)
     {
         publishDefinitions();
@@ -81,10 +96,25 @@ void NivaloDevice::appendSdkDefinitions(JsonObject payload)
             const NivaloRegisteredFunction &registered = _sdkRegistry.functionAt(i);
             JsonObject definition = functions.createNestedObject();
             definition["name"] = registered.name;
-            definition["returnType"] = "integer";
-            definition["timeoutSeconds"] = 30;
-            definition["dangerLevel"] = "safe";
-            definition["sortOrder"] = (int)i;
+            if (registered.displayName.length() > 0U)
+            {
+                definition["displayName"] = registered.displayName;
+            }
+            if (registered.description.length() > 0U)
+            {
+                definition["description"] = registered.description;
+            }
+            if (registered.argumentExample.length() > 0U)
+            {
+                definition["argumentExample"] = registered.argumentExample;
+            }
+            if (registered.returnType.length() > 0U)
+            {
+                definition["returnType"] = registered.returnType;
+            }
+            definition["timeoutSeconds"] = registered.timeoutSeconds;
+            definition["dangerLevel"] = registered.dangerLevel;
+            definition["sortOrder"] = registered.sortOrder;
         }
     }
 }
@@ -146,6 +176,22 @@ size_t NivaloDevice::publishVariables()
 
 bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &commandName, const String &arguments)
 {
+    const NivaloCompletedCommand *cached = _sdkCommandResults.find(commandId);
+    if (cached != NULL)
+    {
+        if (commandName == cached->commandName)
+        {
+            publishCommandAck(commandId, cached->status, cached->message);
+            publishEvent("esp32.command.duplicate", commandName.c_str(), "info");
+        }
+        else
+        {
+            publishCommandAck(commandId, "failed", "Command ID was already used for another command");
+            publishEvent("esp32.command.id_conflict", commandName.c_str(), "warning");
+        }
+        return true;
+    }
+
     if (commandName == "requestDefinitions")
     {
         bool published = publishDefinitions();
@@ -157,10 +203,13 @@ bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &comma
 #else
         if (commandId != NULL && commandId[0] != '\0')
         {
+            const char *status = published ? "succeeded" : "failed";
+            const char *message = published ? "ESP32 definitions published" : "ESP32 definitions publish failed";
+            _sdkCommandResults.remember(commandId, commandName.c_str(), status, message);
             publishCommandAck(
                 commandId,
-                published ? "succeeded" : "failed",
-                published ? "ESP32 definitions published" : "ESP32 definitions publish failed");
+                status,
+                message);
         }
         return true;
 #endif
@@ -174,7 +223,9 @@ bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &comma
         snprintf(ackMessage, sizeof(ackMessage), "Function %s returned %d", commandName.c_str(), result);
         if (commandId != NULL && commandId[0] != '\0')
         {
-            publishCommandAck(commandId, result >= 0 ? "succeeded" : "failed", ackMessage);
+            const char *status = result >= 0 ? "succeeded" : "failed";
+            _sdkCommandResults.remember(commandId, commandName.c_str(), status, ackMessage);
+            publishCommandAck(commandId, status, ackMessage);
         }
         publishEvent(
             result >= 0 ? "esp32.function.succeeded" : "esp32.function.failed",
@@ -201,7 +252,9 @@ bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &comma
     }
     if (commandId != NULL && commandId[0] != '\0')
     {
-        publishCommandAck(commandId, succeeded ? "succeeded" : "failed", message.c_str());
+        const char *status = succeeded ? "succeeded" : "failed";
+        _sdkCommandResults.remember(commandId, commandName.c_str(), status, message.c_str());
+        publishCommandAck(commandId, status, message.c_str());
     }
     publishEvent(
         succeeded ? "esp32.command-handler.succeeded" : "esp32.command-handler.failed",
@@ -209,4 +262,3 @@ bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &comma
         succeeded ? "info" : "warning");
     return true;
 }
-

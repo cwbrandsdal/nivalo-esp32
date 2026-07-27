@@ -10,6 +10,7 @@
 #include "NivaloLinkSpiTransport.h"
 #include "NivaloSdkRegistry.h"
 #include "NivaloConnection.h"
+#include "NivaloCommandResultCache.h"
 #include "NivaloProtocol.h"
 #include "NivaloLinkManager.h"
 #include "NivaloOta.h"
@@ -81,6 +82,8 @@ struct NivaloMqttConfig
     const char *stm32GoldenImageSha256 = NULL;
     const char *primaryNtpServer = "pool.ntp.org";
     const char *secondaryNtpServer = "time.cloudflare.com";
+    // Disable when the application already owns SNTP/timezone setup.
+    bool configureClock = true;
     uint8_t telemetryBufferCapacity = 0;
 };
 
@@ -143,6 +146,7 @@ public:
     size_t publishAvailability(const char *status, const char *reason = NULL);
 
     bool function(const char *name, NivaloFunctionHandler handler);
+    bool function(const char *name, NivaloFunctionHandler handler, const NivaloFunctionMetadata &metadata);
     bool variable(const char *name, int *reference, const char *unit = NULL);
     bool variable(const char *name, unsigned int *reference, const char *unit = NULL);
     bool variable(const char *name, long *reference, const char *unit = NULL);
@@ -173,6 +177,7 @@ private:
     size_t _stm32GoldenImageSizeBytes;
     String _stm32GoldenImageSha256;
     NivaloSdkRegistry _sdkRegistry;
+    NivaloCommandResultCache _sdkCommandResults;
     NivaloConnection _connection;
     NivaloProtocol _protocol;
     NivaloLinkManager _link;

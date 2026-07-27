@@ -69,7 +69,11 @@ void setup()
 #ifdef LED_BUILTIN
     pinMode(LED_BUILTIN, OUTPUT);
 #endif
-    if (!device.function("setLed", setLed) || !device.variable("ledState", &ledState))
+    NivaloFunctionMetadata setLedMetadata;
+    setLedMetadata.displayName = "Set LED";
+    setLedMetadata.description = "Turns the built-in LED on or off.";
+    setLedMetadata.argumentExample = "\"on\"";
+    if (!device.function("setLed", setLed, setLedMetadata) || !device.variable("ledState", &ledState))
     {
         Serial.println("SDK function/variable registration failed");
     }

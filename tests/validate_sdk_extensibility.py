@@ -49,9 +49,12 @@ def main() -> None:
         "functions": [
             {
                 "name": "setLed",
+                "displayName": "Set LED",
+                "description": "Turns the built-in LED on or off.",
+                "argumentExample": "\"on\"",
                 "returnType": "integer",
                 "timeoutSeconds": 30,
-                "dangerLevel": "safe",
+                "dangerLevel": "operational",
                 "sortOrder": 0,
             }
         ],
@@ -63,12 +66,16 @@ def main() -> None:
     device = (ROOT / "src/NivaloDevice.cpp").read_text()
     command = (ROOT / "src/NivaloDeviceCommand.cpp").read_text()
     sdk = (ROOT / "src/NivaloDeviceSdk.cpp").read_text()
+    assert "DefinitionsJsonCapacity = 6144U" in sdk
     assert "bool function(const char *name, NivaloFunctionHandler handler)" in header
+    assert "const NivaloFunctionMetadata &metadata" in header
+    assert "bool configureClock = true;" in header
     assert "bool variable(const char *name, int *reference" in header
     assert "void onCommand(NivaloCommandHandler handler)" in header
     assert "NIVALO_COMMAND_UNHANDLED" in registry_header
     assert "NIVALO_MAX_REGISTERED_FUNCTIONS" in registry_header
     assert "NIVALO_MAX_REGISTERED_VARIABLES" in registry_header
+    assert "struct NivaloFunctionMetadata" in registry_header
 
     callback = command[command.index("void NivaloDevice::mqttCallback"):]
     assert callback.index('"accepted"') < callback.index("dispatchSdkCommand")
@@ -77,13 +84,18 @@ def main() -> None:
     assert 'result >= 0 ? "succeeded" : "failed"' in dispatch_body
     assert "NIVALO_COMMAND_UNHANDLED" in dispatch_body
     assert 'commandName == "requestDefinitions"' in dispatch_body
+    assert "_sdkCommandResults.find(commandId)" in dispatch_body
+    assert 'publishEvent("esp32.command.duplicate"' in dispatch_body
+    assert "_sdkCommandResults.remember(" in dispatch_body
+    lifecycle = (ROOT / "src/NivaloDeviceLifecycle.cpp").read_text()
+    assert "if (config.configureClock)" in lifecycle
     link = (ROOT / "src/NivaloDeviceLink.cpp").read_text()
     assert (device + sdk + link).count("appendSdkDefinitions(") >= 4  # method plus local, SPI, and UART publication paths
     assert 'Serial.print((char)message[i])' not in callback
 
     example = ROOT / "examples/Esp32Only/src/main.cpp"
     source = example.read_text()
-    assert 'device.function("setLed", setLed)' in source
+    assert 'device.function("setLed", setLed, setLedMetadata)' in source
     assert 'device.variable("ledState", &ledState)' in source
     assert "device.publishVariables()" in source
 

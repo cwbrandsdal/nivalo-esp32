@@ -350,9 +350,20 @@ int setLed(String argument) {
   return ledState; // negative means failed; non-negative means succeeded
 }
 
-device.function("setLed", setLed);
+NivaloFunctionMetadata setLedMetadata;
+setLedMetadata.displayName = "Set LED";
+setLedMetadata.description = "Turns the built-in LED on or off.";
+setLedMetadata.argumentExample = "\"on\"";
+setLedMetadata.dangerLevel = "operational";
+
+device.function("setLed", setLed, setLedMetadata);
 device.variable("ledState", &ledState);
 ```
+
+Applications that already configure SNTP and a local timezone can keep
+ownership of that clock setup by setting `mqtt.configureClock = false`.
+Nivalo still publishes UTC timestamps from `time()` without changing the
+application's timezone.
 
 Register before MQTT connects. The library publishes protocol-valid function
 and variable definitions automatically at connection time and republishes when
@@ -360,6 +371,12 @@ a registration is added while connected. Registered references must remain
 valid for the lifetime of the device. Capacity is intentionally bounded to 8
 functions and 12 variables; duplicate, empty, overlong, null, or excess
 registrations return `false`.
+
+The metadata overload is additive; existing `function(name, handler)` sketches
+keep the default integer return type, 30-second timeout, safe danger level, and
+registration-order sorting. Supported danger levels are `safe`, `operational`,
+`disruptive`, and `dangerous`. Metadata is copied during registration, so the
+input structure does not need to remain alive afterward.
 
 `device.publishVariables()` snapshots every registered reference to telemetry;
 the standalone example calls it periodically. Supported references are signed
@@ -383,6 +400,12 @@ Returning `NIVALO_COMMAND_UNHANDLED` preserves the existing behavior: bridge
 builds forward the command to NivaloLink; standalone builds publish a failed
 unsupported-command ACK. The API uses the existing command, definitions, and
 ACK schemas and introduces no wire-format variant.
+
+Completed standalone function and generic-handler results are cached by
+platform command ID in a bounded eight-entry FIFO. If the gateway redelivers an
+ID, the device republishes the cached terminal ACK without executing the
+application handler again. Reusing an ID for a different command fails closed.
+The cache is intentionally volatile: an ESP32 restart clears it.
 
 ## Command ACK compatibility
 
