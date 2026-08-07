@@ -179,6 +179,67 @@ static bool verifyStm32AgainstFile(NivaloStm32Dap &programmer, const char *path,
     input.close();
     return ok && offset == imageSize;
 }
+
+static bool injectStm32RecoveryAcceptanceMismatch(
+    NivaloStm32Dap &programmer,
+    const char *path,
+    size_t imageSize)
+{
+    File input = SPIFFS.open(path, FILE_READ);
+    if (!input || input.size() != imageSize)
+    {
+        if (input)
+        {
+            input.close();
+        }
+        return false;
+    }
+
+    uint8_t original[4] = {0xFFU, 0xFFU, 0xFFU, 0xFFU};
+    uint8_t changed[4] = {0xFFU, 0xFFU, 0xFFU, 0xFFU};
+    uint8_t observed[4] = {0U, 0U, 0U, 0U};
+    size_t offset = 0U;
+    bool found = false;
+    while (offset < imageSize)
+    {
+        memset(original, 0xFF, sizeof(original));
+        size_t count = min(sizeof(original), imageSize - offset);
+        if (input.read(original, count) != count)
+        {
+            break;
+        }
+        memcpy(changed, original, sizeof(changed));
+        for (size_t index = 0U; index < count; ++index)
+        {
+            if (changed[index] != 0U)
+            {
+                changed[index] &= static_cast<uint8_t>(changed[index] - 1U);
+                found = true;
+                break;
+            }
+        }
+        if (found)
+        {
+            break;
+        }
+        offset += count;
+    }
+    input.close();
+
+    if (!found || !programmer.programFlash(
+                      FlashStartAddress + static_cast<uint32_t>(offset),
+                      changed,
+                      sizeof(changed),
+                      false) ||
+        !programmer.dap_read_block(
+            FlashStartAddress + static_cast<uint32_t>(offset),
+            observed,
+            sizeof(observed)))
+    {
+        return false;
+    }
+    return memcmp(original, observed, sizeof(original)) != 0;
+}
 #endif
 
 void listDir(fs::FS &fs, const char *dirname, uint8_t levels)
@@ -716,14 +777,34 @@ void NivaloDevice::handleFirmwareCommand(const String &commandId, JsonObject arg
                         {
                             publishCommandAck(commandId.c_str(), "running", "Read-back verifying STM32 flash", 85);
                         }
+                        bool acceptanceMismatchRequested =
+                            stm32ProgrammingOk && _destructiveStm32RecoveryAcceptancePending;
+                        bool acceptanceMismatchInjected = false;
+                        if (acceptanceMismatchRequested)
+                        {
+                            _destructiveStm32RecoveryAcceptancePending = false;
+                            acceptanceMismatchInjected = injectStm32RecoveryAcceptanceMismatch(
+                                _ota.dap(), "/firmware.bin", expectedSizeBytes);
+                            publishEvent(
+                                acceptanceMismatchInjected
+                                    ? "esp32.flash.stm32-acceptance-corruption-injected"
+                                    : "esp32.flash.stm32-acceptance-corruption-failed",
+                                acceptanceMismatchInjected
+                                    ? "Destructive recovery acceptance mismatch injected"
+                                    : "Destructive recovery acceptance mismatch could not be injected",
+                                acceptanceMismatchInjected ? "warning" : "error");
+                        }
                         bool stm32Verified = stm32ProgrammingOk &&
+                                             (!acceptanceMismatchRequested || acceptanceMismatchInjected) &&
                                              verifyStm32AgainstFile(_ota.dap(), "/firmware.bin", expectedSizeBytes);
 
                         if (!stm32Verified)
                         {
-                            flashFailure = stm32ProgrammingOk
-                                               ? "STM32 full read-back verification failed"
-                                               : "STM32 programming failed";
+                            flashFailure = acceptanceMismatchRequested && !acceptanceMismatchInjected
+                                               ? "STM32 recovery acceptance mismatch injection failed"
+                                               : (stm32ProgrammingOk
+                                                      ? "STM32 full read-back verification failed"
+                                                      : "STM32 programming failed");
                             publishEvent("esp32.flash.stm32-recovery-started", flashFailure.c_str(), "warning");
                             if (commandId.length() > 0)
                             {

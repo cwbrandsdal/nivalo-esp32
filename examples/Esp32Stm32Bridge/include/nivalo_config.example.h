@@ -41,3 +41,9 @@
 // #define NIVALO_STM32_GOLDEN_IMAGE_PATH "/stm32-golden.bin"
 // #define NIVALO_STM32_GOLDEN_IMAGE_SIZE_BYTES 524288U
 // #define NIVALO_STM32_GOLDEN_IMAGE_SHA256 "64-lowercase-hex-characters"
+
+// DESTRUCTIVE NON-PRODUCTION ACCEPTANCE ONLY. When defined locally, the next
+// successfully programmed STM32 candidate is deliberately changed before
+// read-back so automatic recovery can be proven. Reflash normal bridge
+// firmware immediately after the attended drill. Never enable in production.
+// #define NIVALO_STM32_DESTRUCTIVE_RECOVERY_ACCEPTANCE_ONCE 1

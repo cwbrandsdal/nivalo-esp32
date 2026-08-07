@@ -151,6 +151,7 @@ NivaloDevice::NivaloDevice()
     _preserveKnownGoodStm32Image = false;
     _knownGoodStm32ImageSizeBytes = 0U;
     _stm32GoldenImageSizeBytes = 0U;
+    _destructiveStm32RecoveryAcceptancePending = false;
 }
 
 boolean NivaloDevice::begin(HardwareSerial &hardSerial, unsigned long baud)
@@ -292,6 +293,7 @@ boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
     _stm32GoldenImagePath = config.stm32GoldenImagePath == NULL ? "" : config.stm32GoldenImagePath;
     _stm32GoldenImageSizeBytes = config.stm32GoldenImageSizeBytes;
     _stm32GoldenImageSha256 = config.stm32GoldenImageSha256 == NULL ? "" : config.stm32GoldenImageSha256;
+    _destructiveStm32RecoveryAcceptancePending = config.destructiveStm32RecoveryAcceptanceOnce;
     _firmwareVersion = config.firmwareVersion;
     _hardwareName = config.hardwareName;
     _telemetryBufferCapacity = min((uint8_t)8U, config.telemetryBufferCapacity);

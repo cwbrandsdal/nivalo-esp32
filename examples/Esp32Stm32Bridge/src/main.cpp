@@ -67,6 +67,10 @@ bool startDevice(const NivaloRuntimeCredentials &runtime)
     config.mqtt.stm32GoldenImageSha256 = NIVALO_STM32_GOLDEN_IMAGE_SHA256;
 #endif
 
+#if defined(NIVALO_STM32_DESTRUCTIVE_RECOVERY_ACCEPTANCE_ONCE)
+    config.mqtt.destructiveStm32RecoveryAcceptanceOnce = true;
+#endif
+
     return device.begin(config);
 }
 } // namespace
