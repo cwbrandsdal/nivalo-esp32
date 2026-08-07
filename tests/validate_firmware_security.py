@@ -83,6 +83,16 @@ def main() -> None:
     assert "verifyStm32AgainstFile(_ota.dap(), \"/firmware.bin\"" in device
     assert "esp32.flash.stm32-recovery-succeeded" in device
     assert "esp32.flash.stm32-recovery-failed" in device
+    assert "destructiveStm32RecoveryAcceptanceOnce = false" in (ROOT / "src/NivaloDevice.h").read_text()
+    assert "_destructiveStm32RecoveryAcceptancePending = false" in device
+    candidate_flow = device[device.index("bool stm32ProgrammingOk"):]
+    assert candidate_flow.index("_destructiveStm32RecoveryAcceptancePending = false") < candidate_flow.index(
+        "acceptanceMismatchInjected = injectStm32RecoveryAcceptanceMismatch"
+    )
+    assert candidate_flow.index("acceptanceMismatchInjected = injectStm32RecoveryAcceptanceMismatch") < candidate_flow.index(
+        'verifyStm32AgainstFile(_ota.dap(), "/firmware.bin"'
+    )
+    assert "esp32.flash.stm32-acceptance-corruption-injected" in device
     assert "MBEDTLS_ECP_DP_SECP256R1" in security
     assert "setInsecure" not in device
     assert 'Serial.println(payload)' not in device

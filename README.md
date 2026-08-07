@@ -284,6 +284,19 @@ verification failure automatically restores the recovery image, verifies the
 restore, and reports whether recovery succeeded. If recovery is not configured
 or cannot be prepared, programming is refused.
 
+For an attended, destructive recovery drill on a dedicated non-production
+bench, an application may set
+`destructiveStm32RecoveryAcceptanceOnce = true`. This local-only option is
+disabled by default and is not read from MQTT command arguments. After the next
+STM32 candidate programs, it clears one programmed flash bit before the normal
+full read-back. The mismatch therefore enters the same automatic recovery path
+as a real verification failure. The option is consumed before injection so it
+cannot affect a second update during the same boot. Evidence must include the
+`esp32.flash.stm32-acceptance-corruption-injected`, recovery-started, and
+recovery-succeeded events plus an independent read-back of the restored image.
+Immediately reflash normal bridge firmware after the drill; never enable this
+option on production hardware.
+
 Storage capacity is a deployment constraint, not a compile-time assumption.
 ESP32 updates need free SPIFFS space at least equal to signed `sizeBytes`.
 Snapshot-based STM32 updates need the staged update plus the configured

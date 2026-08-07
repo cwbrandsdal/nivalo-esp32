@@ -80,6 +80,11 @@ struct NivaloMqttConfig
     const char *stm32GoldenImagePath = NULL;
     size_t stm32GoldenImageSizeBytes = 0;
     const char *stm32GoldenImageSha256 = NULL;
+    // Destructive, non-production acceptance hook. When locally enabled by
+    // the application, the next successfully programmed STM32 candidate is
+    // changed before read-back so the configured recovery path is exercised.
+    // The hook is consumed once per boot and cannot be enabled by MQTT input.
+    bool destructiveStm32RecoveryAcceptanceOnce = false;
     const char *primaryNtpServer = "pool.ntp.org";
     const char *secondaryNtpServer = "time.cloudflare.com";
     // Disable when the application already owns SNTP/timezone setup.
@@ -176,6 +181,7 @@ private:
     String _stm32GoldenImagePath;
     size_t _stm32GoldenImageSizeBytes;
     String _stm32GoldenImageSha256;
+    bool _destructiveStm32RecoveryAcceptancePending;
     NivaloSdkRegistry _sdkRegistry;
     NivaloCommandResultCache _sdkCommandResults;
     NivaloConnection _connection;
