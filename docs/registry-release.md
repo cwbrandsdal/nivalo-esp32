@@ -81,11 +81,15 @@ same-name package under a different namespace cannot satisfy the release. The
 source examples remain optimized for repository-local development. Release
 validation fails closed if any of these packaged-tree invariants drift.
 
-CI packs both release candidates and builds three clean consumers from those
-exact archives: the browser-provisioning artifact, a standalone device, and a
-bridge with the maintained DAP package. The release workflow repeats the same
-archive builds before it retains the selected package. It also runs the official
-Arduino Lint 1.3.0 binary after verifying its published SHA-256; normal CI uses
+Pull-request CI runs the registry staging validator and the packer/verifier
+unit tests but does not build archives. The release workflow packs both release
+candidates and builds three clean consumers from those exact archives: the
+browser-provisioning artifact, a standalone device, and a bridge with the
+maintained DAP package. The verifier inspects the packaged browser build's
+merged binary directly. The release workflow also builds every repository
+example environment and inspects the repository browser artifact before it
+retains the selected package. Both workflows run the official Arduino Lint
+1.3.0 binary after verifying its published SHA-256; normal CI uses
 specification compliance. Strict Library Manager submission compliance runs for
 a device release only after the repository has deliberately been made public,
 because the official submission check must be able to resolve the repository
@@ -93,9 +97,9 @@ URL. PlatformIO validation and publication do not require that visibility
 change.
 
 The `Registry release` workflow can also be dispatched with `publish=false` and
-an existing `refs/tags/...` ref. It reruns firmware validators, both repository
-builds, staging, packing, archive inspection, and checksum generation without
-contacting a registry.
+an existing `refs/tags/...` ref. It reruns the signature, claim, schema and
+provenance checks, the repository example builds, staging, packing, archive
+inspection, and checksum generation without contacting a registry.
 
 The repository packer writes a byte-reproducible archive: members are sorted,
 ownership and modes are canonical, and tar/gzip timestamps are zero. Repeating
@@ -112,7 +116,8 @@ compilation, then installs all library dependencies while building the three
 fresh consumers. Archive-consumer builds use one compiler job so a first-use
 toolchain extraction is not coupled to workstation CPU/process limits. On
 Windows it also compiles a throwaway object with the newly extracted toolchain,
-using a bounded three-attempt readiness probe before any package build.
+using a bounded three-attempt readiness probe before any package build; CI no
+longer runs a Windows lane, so this matters only for local Windows dry runs.
 Keep the Windows core path short (for example `C:\pio-empty`) because the pinned
 Xtensa GCC toolchain is not long-path safe. The verifier fails without falling
 back to the normal PlatformIO cache.
@@ -133,8 +138,6 @@ SHA-256 instead of rebuilding a potentially different tarball.
    bridge using its exact package version.
 6. Publish the device package. Confirm a fresh standalone install and a bridge
    install that explicitly includes the DAP package.
-7. Record tag, commit, archive SHA-256, registry owner/package/version, workflow
-   run, approver and verification results in the release evidence.
 
 A matching tag push is validation-only. Publication requires a manual dispatch
 against the exact immutable `refs/tags/...` ref with `publish=true`, the exact
@@ -161,8 +164,8 @@ submit that repository separately. This runbook does not authorize or perform
 those operations.
 
 After either Arduino submission, verify index ingestion and install/build from a
-fresh Arduino Library Manager cache. Record the registry index version and test
-result. PlatformIO publication does not prove Arduino readiness.
+fresh Arduino Library Manager cache. PlatformIO publication does not prove
+Arduino readiness.
 
 ## Rollback and deprecation
 
@@ -179,8 +182,8 @@ If a bad version is published:
    reversible.
 3. Publish a corrected patch version under a new tag and document the affected
    version, impact and upgrade path.
-4. Keep provenance and release evidence for the withdrawn version.
+4. Keep the provenance files and tag for the withdrawn version.
 
 For DAP incompatibility, deprecate the DAP version and every device release that
 recommends it together. Keep at least the prior known-good pair documented until
-the replacement has passed both bridge builds and attended STM32 OTA testing.
+the replacement has passed both bridge builds and a real STM32 OTA update.

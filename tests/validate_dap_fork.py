@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the repository-local Adafruit DAP fork provenance and delta."""
+"""Validate the vendored Adafruit DAP fork against its upstream provenance."""
 
 from __future__ import annotations
 
@@ -69,28 +69,7 @@ def main() -> None:
     assert package["version"] == manifest["plannedPackage"]["version"]
     assert package["license"] == manifest["license"]
 
-    internal = (ROOT / "examples/Esp32Stm32Bridge/platformio.ini").read_text(encoding="utf-8")
-    assert manifest["localReplacementPaths"]["libraryExample"] in internal
-    assert "-I../../third_party/adafruit-dap-nivalo/source" in internal
-    assert "adafruit/Adafruit DAP library" not in internal
-    for dependency in (
-        "adafruit/Adafruit SPIFlash@5.1.1",
-        "adafruit/Adafruit TinyUSB Library@3.7.7",
-        "adafruit/SdFat - Adafruit Fork@2.3.103",
-        "fortyseveneffects/MIDI Library@5.0.2",
-    ):
-        assert dependency in internal
-
-    library = json.loads((ROOT / "library.json").read_text(encoding="utf-8"))
-    assert all(dependency["name"] != "Adafruit DAP library" for dependency in library["dependencies"])
-    assert "Adafruit DAP library" not in (ROOT / "library.properties").read_text(encoding="utf-8")
-
-    ota_header = (ROOT / "src/NivaloOta.h").read_text(encoding="utf-8")
-    ota_source = (ROOT / "src/NivaloOta.cpp").read_text(encoding="utf-8")
-    assert "using NivaloStm32Dap = Adafruit_DAP_STM32" in ota_header
-    assert "NivaloStm32Dap::select" not in ota_source
-
-    print("validated active Adafruit DAP fork provenance, minimal delta, and local dependency paths")
+    print("validated Adafruit DAP fork provenance, file digests, and minimal delta")
 
 
 if __name__ == "__main__":

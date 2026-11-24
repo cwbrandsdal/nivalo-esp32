@@ -299,7 +299,6 @@ def build_factory_artifact(
     boot_app_path: Path,
     application_path: Path,
     artifact_path: Path,
-    evidence_path: Path,
 ) -> dict[str, Any]:
     artifact = build_factory_bytes(
         bootloader_path.read_bytes(),
@@ -307,32 +306,30 @@ def build_factory_artifact(
         boot_app_path.read_bytes(),
         application_path.read_bytes(),
     )
-    evidence = inspect_artifact(artifact)
+    inspection = inspect_artifact(artifact)
     _write_atomic(artifact_path, artifact)
-    evidence_bytes = (json.dumps(evidence, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    _write_atomic(evidence_path, evidence_bytes)
     print(
         "Nivalo browser-flash artifact prepared without signing: "
-        f"{artifact_path} ({len(artifact)} bytes, sha256={evidence['artifactSha256']})"
+        f"{artifact_path} ({len(artifact)} bytes, sha256={inspection['artifactSha256']})"
     )
     print(
-        "Operator partition approval input: "
-        + json.dumps(evidence["approvedPartitionTables"], separators=(",", ":"))
+        "Approved partition tables: "
+        + json.dumps(inspection["approvedPartitionTables"], separators=(",", ":"))
     )
-    return evidence
+    return inspection
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     inspect_parser = subparsers.add_parser(
-        "inspect", help="independently validate a merged artifact and print evidence"
+        "inspect", help="independently validate a merged artifact and print its properties"
     )
     inspect_parser.add_argument("artifact", type=Path)
     arguments = parser.parse_args()
     if arguments.command == "inspect":
-        evidence = inspect_artifact(arguments.artifact.read_bytes())
-        print(json.dumps(evidence, indent=2, sort_keys=True))
+        inspection = inspect_artifact(arguments.artifact.read_bytes())
+        print(json.dumps(inspection, indent=2, sort_keys=True))
         return 0
     raise AssertionError("unreachable")
 

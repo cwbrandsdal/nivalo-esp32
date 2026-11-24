@@ -22,7 +22,6 @@ def create_browser_artifact(source, target, env):  # noqa: ANN001
         boot_app_path=framework_dir / "tools" / "partitions" / "boot_app0.bin",
         application_path=build_dir / "firmware.bin",
         artifact_path=build_dir / "nivalo-provisioning.merged.bin",
-        evidence_path=build_dir / "nivalo-provisioning.merged.evidence.json",
     )
 
 

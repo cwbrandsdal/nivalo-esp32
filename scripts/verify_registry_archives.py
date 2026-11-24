@@ -8,10 +8,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from browser_flash_artifact import inspect_artifact  # noqa: E402
 
 
 DEVICE_LOCAL_DEPENDENCY = "symlink://../.."
@@ -155,13 +160,17 @@ def build_archives(
             "1",
             environment=environment,
         )
-        browser_build = browser_project / ".pio/build/featheresp32-browser-provisioning"
-        for required in (
-            "nivalo-provisioning.merged.bin",
-            "nivalo-provisioning.merged.evidence.json",
-        ):
-            if not (browser_build / required).is_file():
-                raise FileNotFoundError(f"packaged browser build did not create {required}")
+        merged = (
+            browser_project
+            / ".pio/build/featheresp32-browser-provisioning/nivalo-provisioning.merged.bin"
+        )
+        if not merged.is_file():
+            raise FileNotFoundError(f"packaged browser build did not create {merged.name}")
+        inspection = inspect_artifact(merged.read_bytes())
+        print(
+            f"inspected packaged browser artifact: {inspection['artifactSizeBytes']} bytes, "
+            f"sha256={inspection['artifactSha256']}"
+        )
 
         standalone = root / "standalone-consumer"
         shutil.copytree(extracted / "examples/Esp32Only", standalone)
