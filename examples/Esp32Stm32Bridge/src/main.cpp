@@ -7,6 +7,9 @@
 #else
 #include "nivalo_config.example.h"
 #endif
+#ifndef NIVALO_ALLOW_PLAINTEXT_NVS
+#define NIVALO_ALLOW_PLAINTEXT_NVS 0
+#endif
 
 namespace
 {
@@ -58,8 +61,7 @@ void setup()
     config.claimUrl = NIVALO_DEVICE_CLAIM_URL;
     config.hardwareType = NIVALO_IOT_HARDWARE_NAME;
     config.setupButtonPin = NIVALO_SETUP_BUTTON_PIN;
-    config.allowUnencryptedNvsForLocalDevelopment =
-        NIVALO_ALLOW_UNENCRYPTED_NVS_FOR_LOCAL_DEVELOPMENT != 0;
+    config.allowPlaintextNvs = NIVALO_ALLOW_PLAINTEXT_NVS != 0;
 
 #if NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE
     static const NivaloRuntimeCredentials localFixture = {

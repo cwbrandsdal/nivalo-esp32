@@ -27,6 +27,9 @@ struct NivaloOtaDevice
     const char *productId = "";
     uint32_t runningSecurityVersion = 0U;
     uint32_t committedFloor = 0U;
+    // false: a committed floor record exists but could not be read. No security version can then be
+    // shown to exceed the floor, so every OTA job is rejected; the record is left for recovery.
+    bool floorReadable = true;
     // Size of the inactive application slot.
     uint32_t maxImageBytes = 0U;
     // https://host[:port]; OTA downloads must come from this origin.
@@ -96,15 +99,21 @@ public:
     NivaloImageDescriptorScanner();
     void reset();
     void update(const uint8_t *data, size_t length);
-    // Exactly one valid descriptor was found.
+    // Exactly one valid descriptor was found and the magic occurs exactly once, at any byte
+    // offset (overlapping occurrences included).
     bool identity(NivaloImageIdentity *identity) const;
     unsigned count() const { return _count; }
+    unsigned magicCount() const { return _magicCount; }
 
 private:
     void candidate();
     uint8_t _magic[16];
     uint8_t _buffer[NivaloImageDescriptorBytes];
+    // Bytes of the candidate being collected (0: none), and of the magic matched at the current
+    // position, which runs independently so a magic inside a candidate is still counted.
+    size_t _collected = 0U;
     size_t _matched = 0U;
+    unsigned _magicCount = 0U;
     unsigned _count = 0U;
     bool _conflict = false;
     NivaloImageIdentity _identity;

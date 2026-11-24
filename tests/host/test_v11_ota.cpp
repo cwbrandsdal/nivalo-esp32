@@ -217,6 +217,48 @@ int descriptorCases()
     context() = "image without a descriptor";
     V11_CHECK(!scan(filler(50000U, 2U), 512U, &found, &count), "found a descriptor in filler");
     checked++;
+
+    // A stray magic whose 64-byte candidate window covers the start of a second, complete
+    // descriptor: a scanner that consumes the window misses that descriptor and counts only the
+    // one at 33333. Every magic occurrence counts, overlapping ones included.
+    for (size_t offset : {16U, 40U, 63U})
+    {
+        context() = std::string("descriptor hidden at candidate byte ") + std::to_string(offset);
+        std::vector<uint8_t> overlapping = image;
+        std::vector<uint8_t> hidden(descriptor, descriptor + 16U);
+        hidden.resize(offset, 0x20U);
+        hidden.insert(hidden.end(), descriptor, descriptor + NivaloImageDescriptorBytes);
+        overlapping.insert(overlapping.begin() + 10000, hidden.begin(), hidden.end());
+        NivaloImageDescriptorScanner scanner;
+        for (size_t at = 0; at < overlapping.size(); at += 512U)
+        {
+            scanner.update(overlapping.data() + at, std::min<size_t>(512U, overlapping.size() - at));
+        }
+        V11_CHECK(scanner.magicCount() == 3U && !scanner.identity(&found), "magic " << scanner.magicCount());
+        checked++;
+    }
+    return checked;
+}
+
+int floorCases(JsonObjectConst root)
+{
+    int checked = 0;
+    context() = "H4: an unreadable floor rejects a job between the running version and the lost floor";
+    JsonObjectConst mock = root["mockImage"].as<JsonObjectConst>();
+    NivaloOperation operation;
+    V11_CHECK(parseOta(mock["payload"], &operation), "mock job parses");
+    // A fallback image at security version 5 runs; the committed floor (9) cannot be read.
+    Device device(root["device"].as<JsonObjectConst>(), JsonObjectConst());
+    device.ota.runningSecurityVersion = 5U;
+    device.ota.committedFloor = 0U;
+    device.ota.floorReadable = false;
+    V11_CHECK(operation.manifest.securityVersion > 5U && operation.manifest.securityVersion < 9U, "vector version");
+    V11_CHECK(nivaloOtaPrecheck(device.ota, operation) == NIVALO_OTA_PRECHECK_SECURITY_VERSION,
+              precheckName(nivaloOtaPrecheck(device.ota, operation)));
+    // Read as zero (the former behaviour), the same job would have been accepted.
+    device.ota.floorReadable = true;
+    V11_CHECK(nivaloOtaPrecheck(device.ota, operation) == NIVALO_OTA_PRECHECK_OK, "control");
+    checked++;
     return checked;
 }
 
@@ -294,6 +336,7 @@ int main()
     int checked = signatureCases(root);
     checked += precheckCases(root);
     checked += descriptorCases();
+    checked += floorCases(root);
     checked += recordCases();
     return finish("OTA vectors", checked);
 }

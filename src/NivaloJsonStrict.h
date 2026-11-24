@@ -23,7 +23,10 @@ struct NivaloJsonScan
 {
     NivaloJsonRule rule = NIVALO_JSON_SYNTAX;
     bool rootIsObject = false;
-    // The exact bytes of the root object's member named "payload", as received (section 10.4).
+    // Input: the root object's member whose value span is captured.
+    const char *captureMember = "payload";
+    // The exact bytes of the root object's member named captureMember, as received (the
+    // envelope's "payload" for the section 10.4 fingerprint, a command's "arguments").
     bool hasPayload = false;
     size_t payloadOffset = 0U;
     size_t payloadLength = 0U;

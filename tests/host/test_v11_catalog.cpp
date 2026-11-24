@@ -429,6 +429,36 @@ int plannerCases()
     V11_CHECK(server.snapshot() == settled, server.snapshot());
     checked++;
 
+    context() = "M3: a second case-only rename of one name is refused, the history kept";
+    {
+        Source chain = source;
+        chain.capabilities[0].name = "Temp";
+        NivaloCatalogState renamed;
+        V11_CHECK(nivaloPlanCatalog(chain, stored.get(), &renamed) == NIVALO_CATALOG_CHANGED, "first rename");
+        chain.capabilities[0].name = "TEMP";
+        NivaloCatalogState twice;
+        V11_CHECK(nivaloPlanCatalog(chain, &renamed, &twice) == NIVALO_CATALOG_REFUSED,
+                  "a live name with two retired case twins was planned");
+        checked++;
+    }
+
+    context() = "M3: retiring more names than the tombstone budget is refused";
+    {
+        Source many;
+        for (int i = 0; i < 17; i++)
+            many.capabilities.push_back({NIVALO_KIND_VARIABLE, "v" + std::to_string(i),
+                                         "{\"dataType\":\"number\",\"historyEnabled\":true,\"sortOrder\":0}"});
+        NivaloCatalogState first, emptied;
+        V11_CHECK(nivaloPlanCatalog(many, NULL, &first) == NIVALO_CATALOG_CHANGED, "17 live names");
+        Source none;
+        V11_CHECK(nivaloPlanCatalog(none, &first, &emptied) == NIVALO_CATALOG_REFUSED,
+                  "17 retirements planned with room for " << NivaloCatalogMaxRetired);
+        many.capabilities.resize(1);
+        V11_CHECK(nivaloPlanCatalog(many, &first, &emptied) == NIVALO_CATALOG_CHANGED && emptied.retiredCount == 16U,
+                  "16 retirements fit");
+        checked++;
+    }
+
     context() = "full-size catalog";
     Source full;
     const std::string longText(120, 'x');

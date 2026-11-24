@@ -58,10 +58,15 @@ enum NivaloCatalogDecision
     // A new revision: persist next before publishing anything.
     NIVALO_CATALOG_CHANGED = 1,
     // Too many entries, or the revision cannot advance.
-    NIVALO_CATALOG_INVALID = 2
+    NIVALO_CATALOG_INVALID = 2,
+    // The transition cannot be represented: the retired names would exceed the tombstone budget,
+    // or a live name would have more than one retired case twin of its kind (an ambiguous
+    // case-rename chain). Nothing is stored; the stored history stays as it is.
+    NIVALO_CATALOG_REFUSED = 3
 };
 
-// Decides the revision for the current registrations. stored is NULL when nothing was persisted.
+// Decides the revision for the current registrations. stored is NULL when nothing was persisted
+// (first enrollment); a catalog that could not be read must not be passed as NULL.
 NivaloCatalogDecision nivaloPlanCatalog(const NivaloCatalogSource &source, const NivaloCatalogState *stored,
                                         NivaloCatalogState *next);
 

@@ -394,6 +394,12 @@ NivaloDownlinkOutcome nivaloParseDownlink(const NivaloTopics &topics, const char
     memcpy(operation->id, routeId, sizeof(routeId));
     operation->seq = seq;
 
+    // firmware-placement (section 4.3): envelope firmware belongs on availability birth only.
+    if (has(envelope.as<JsonObjectConst>(), "firmware"))
+    {
+        return NIVALO_DOWNLINK_IDENTIFIED;
+    }
+
     if (operationClass == NIVALO_OPERATION_COMMAND)
     {
         if (!nivaloValidCommandPayload(body) || !nivaloParseUtc(text(body["issuedAt"]), &operation->issuedAtMs) ||
@@ -403,8 +409,20 @@ NivaloDownlinkOutcome nivaloParseDownlink(const NivaloTopics &topics, const char
         {
             return NIVALO_DOWNLINK_IDENTIFIED;
         }
-        const size_t written = serializeJson(body["arguments"], operation->arguments, sizeof(operation->arguments));
-        operation->valid = written > 0U && written < sizeof(operation->arguments);
+        // The arguments are kept as the exact bytes received, so the validator and the handler see
+        // the values that were sent (and the fingerprint covers).
+        NivaloJsonScan inner;
+        inner.captureMember = "arguments";
+        if (nivaloScanJson(bytes + scan.payloadOffset, scan.payloadLength, NivaloV11::MaxDepth, NivaloV11::MaxValues,
+                           &inner) != NIVALO_JSON_OK ||
+            !inner.hasPayload || inner.payloadLength == 0U || inner.payloadLength >= sizeof(operation->arguments))
+        {
+            return NIVALO_DOWNLINK_IDENTIFIED;
+        }
+        memcpy(operation->arguments, bytes + scan.payloadOffset + inner.payloadOffset, inner.payloadLength);
+        operation->arguments[inner.payloadLength] = '\0';
+        operation->argumentsLength = inner.payloadLength;
+        operation->valid = true;
         return NIVALO_DOWNLINK_IDENTIFIED;
     }
 

@@ -29,9 +29,12 @@ struct NivaloOperation
     bool valid = false;
     int64_t issuedAtMs = 0;
     int64_t expiresAtMs = 0;
-    // Generic command.
+    // Generic command. arguments holds the exact bytes of payload.arguments as received (a JSON
+    // object, NUL-terminated); they are parsed once, by the handler's preparation, never
+    // re-serialized.
     char command[65] = {0};
-    char arguments[NivaloV11::MaxCommandBytes] = {0}; // compact JSON object
+    char arguments[NivaloV11::MaxCommandBytes] = {0};
+    size_t argumentsLength = 0U;
     // OTA job.
     NivaloOtaManifest manifest;
     char url[513] = {0};
@@ -44,7 +47,9 @@ enum NivaloDownlinkOutcome
     // Not identified: dropped without an ACK.
     NIVALO_DOWNLINK_DROPPED = 0,
     // Identified: topic, size, encoding, JSON, complexity, envelope, device ID, correlation and
-    // commandSeq are valid. operation->valid tells whether the rest of the payload is.
+    // commandSeq are valid. operation->valid tells whether the rest is: the payload schema and
+    // lifetime, firmware placement (no envelope firmware on an operation route) and, for OTA, the
+    // strict DER signature encoding.
     NIVALO_DOWNLINK_IDENTIFIED = 1
 };
 

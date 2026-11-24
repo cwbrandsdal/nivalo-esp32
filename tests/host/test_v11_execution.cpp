@@ -3,6 +3,7 @@
 // Power loss is simulated by an exception thrown from the fake storage; the durable state of the
 // fake survives it and the next boot step builds a new executor from that state, as a reset would.
 
+#include "NivaloArguments.h"
 #include "NivaloDownlink.h"
 #include "NivaloExecutor.h"
 #include "NivaloJournal.h"
@@ -10,7 +11,9 @@
 #include "v11_test_support.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <vector>
 
@@ -117,6 +120,18 @@ public:
     int handlerCalls = 0;
     int refreshes = 0;
     int activations = 0;
+    // Platform calls in order ("prepare", "clock", "claim", "done", "invoke", ...).
+    std::vector<std::string> calls;
+    // The invocation token handed to the last handler or download.
+    uint32_t lastToken = 0U;
+    // The arguments object the validator and the handler received, as prepared once.
+    NivaloPreparedArguments prepared;
+    // Focused cases: a handler and validator of their own instead of the fixture's schema.
+    std::function<bool(JsonObjectConst)> validator;
+    std::function<NivaloFunctionOutcome(JsonObjectConst)> customHandler;
+    // Storage failures that return false (not a reset).
+    bool failTerminalWrite = false;
+    bool powerCutOnClearPending = false;
 
     // Behaviour of the current step.
     std::string handler;
@@ -152,6 +167,11 @@ public:
     bool writeJournal(const NivaloJournal &record) override
     {
         const bool claim = record.hasLast && record.phase == NIVALO_PHASE_CLAIMED && !booting;
+        calls.push_back(claim ? "claim" : "done");
+        if (!claim && !booting && failTerminalWrite)
+        {
+            return false;
+        }
         if (claim && handler == "powerLossBeforeClaim")
         {
             throw PowerCut();
@@ -198,6 +218,11 @@ public:
 
     bool clearPending() override
     {
+        calls.push_back("clearPending");
+        if (powerCutOnClearPending)
+        {
+            throw PowerCut();
+        }
         pendingStored = false;
         return true;
     }
@@ -214,6 +239,7 @@ public:
 
     NivaloClockReading readClock() override
     {
+        calls.push_back("clock");
         for (size_t i = 0; i < syncs.size(); i++)
         {
             executor->onTrustedSync(syncs[i].first, syncs[i].second);
@@ -242,23 +268,35 @@ public:
 
     void publishAck(const NivaloAck &ack) override { acks.push_back(ack); }
 
-    bool hasFunction(const char *name) override { return functions.containsKey(name); }
+    bool hasFunction(const char *name) override { return customHandler ? true : functions.containsKey(name); }
 
-    bool validArguments(const char *name, const char *argumentsJson) override
+    // The production preparation: the original argument bytes, parsed once.
+    bool prepareFunction(const NivaloOperation &operation) override
     {
-        DynamicJsonDocument arguments(4096);
-        if (deserializeJson(arguments, argumentsJson) != DeserializationError::Ok)
+        calls.push_back("prepare");
+        if (!prepared.prepare(operation.arguments, operation.argumentsLength))
         {
             return false;
         }
-        return schemaAccepts(functions[name], arguments.as<JsonVariantConst>());
+        const bool accepted = validator ? validator(prepared.object())
+                                        : schemaAccepts(functions[operation.command], prepared.object());
+        if (!accepted)
+        {
+            prepared.release();
+        }
+        return accepted;
     }
 
-    NivaloFunctionOutcome invokeFunction(const char *, const char *) override
+    NivaloFunctionOutcome invokePrepared(uint32_t token) override
     {
+        calls.push_back("invoke");
         handlerCalls++;
-        return outcome(handler);
+        lastToken = token;
+        V11_CHECK(prepared.ready(), "the handler runs only with prepared arguments");
+        return customHandler ? customHandler(prepared.object()) : outcome(handler);
     }
+
+    void releasePrepared() override { prepared.release(); }
 
     NivaloFunctionOutcome outcome(const std::string &name)
     {
@@ -282,9 +320,17 @@ public:
         return NIVALO_FUNCTION_SUCCEEDED;
     }
 
-    void refreshCatalog() override { refreshes++; }
+    NivaloRefreshOutcome refreshCatalog() override
+    {
+        refreshes++;
+        return NIVALO_REFRESH_COMPLETE;
+    }
 
-    NivaloDownloadOutcome downloadImage(const NivaloOperation &) override { return download(handler); }
+    NivaloDownloadOutcome downloadImage(const NivaloOperation &, uint32_t token) override
+    {
+        lastToken = token;
+        return download(handler);
+    }
 
     NivaloDownloadOutcome download(const std::string &name)
     {
@@ -577,11 +623,14 @@ struct Harness
         if (device.activeClass == NIVALO_OPERATION_OTA)
         {
             device.queueSyncs();
-            executor->completeDownload(device.download(device.handler.empty() ? "installed" : device.handler));
+            V11_CHECK(executor->completeDownload(device.lastToken,
+                                                 device.download(device.handler.empty() ? "installed" : device.handler)),
+                      "completion of the running download refused");
         }
         else
         {
-            executor->completeFunction(device.outcome(device.handler));
+            V11_CHECK(executor->completeFunction(device.lastToken, device.outcome(device.handler)),
+                      "completion of the running handler refused");
         }
     }
 };
@@ -786,8 +835,312 @@ int fingerprintCases(JsonObjectConst root)
     }
     return checked;
 }
-} // namespace
 
+// --- Focused regressions -------------------------------------------------------------------------
+
+const char FirmwareMember[] = ",\"firmware\":{\"version\":\"1.0.0\",\"hardware\":\"esp32-standalone\",\"targets\":[\"esp32\"]}";
+
+std::string commandIdFor(uint32_t seq)
+{
+    char id[37];
+    std::snprintf(id, sizeof(id), "44444444-4444-4444-8444-4444%08lx", (unsigned long)seq);
+    return id;
+}
+
+// One identified downlink through the real parser; extra is spliced into the envelope.
+NivaloOperation parsed(const std::string &route, const std::string &id, const std::string &payload,
+                       const std::string &extra = "")
+{
+    std::string envelope = envelopeFor(id, payload);
+    envelope.insert(envelope.size() - 1U, extra);
+    const std::string topic = std::string("nivalo/v1.1/devices/") + DeviceId + "/" + route + "/" + id;
+    NivaloTopics topics;
+    topics.configure(DeviceId);
+    NivaloOperation operation;
+    V11_CHECK(nivaloParseDownlink(topics, topic.c_str(), reinterpret_cast<const uint8_t *>(envelope.data()),
+                                  envelope.size(), &operation) == NIVALO_DOWNLINK_IDENTIFIED,
+              "downlink not identified");
+    return operation;
+}
+
+NivaloOperation commandOperation(uint32_t seq, const std::string &arguments, const std::string &extra = "")
+{
+    const std::string payload = "{\"commandSeq\":" + std::to_string(seq) +
+                                ",\"issuedAt\":\"2026-11-24T12:00:00Z\",\"expiresAt\":\"2026-11-24T12:05:00Z\","
+                                "\"command\":\"configure\",\"arguments\":" + arguments + "}";
+    return parsed("commands", commandIdFor(seq), payload, extra);
+}
+
+// A device already booted with an empty journal, its clock at 12:00:30.
+struct Focus
+{
+    DynamicJsonDocument caseDocument{256};
+    DynamicJsonDocument stepDocument{1024};
+    std::unique_ptr<Harness> harness;
+
+    explicit Focus(JsonObjectConst root)
+    {
+        deserializeJson(caseDocument, "{\"journal\":{\"highWater\":0}}");
+        harness.reset(new Harness(root, caseDocument.as<JsonObjectConst>()));
+        step("{\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\"}}");
+    }
+    void step(const char *json)
+    {
+        stepDocument.clear();
+        deserializeJson(stepDocument, json);
+        device().beginStep(stepDocument.as<JsonVariantConst>());
+        device().calls.clear();
+    }
+    FakeDevice &device() { return harness->device; }
+    NivaloExecutor &executor() { return *harness->executor; }
+    std::string acks() const
+    {
+        std::string text;
+        for (const NivaloAck &ack : harness->device.acks) text += ackText(ack);
+        return text;
+    }
+};
+
+size_t indexOf(const std::vector<std::string> &calls, const std::string &name)
+{
+    for (size_t i = 0; i < calls.size(); i++)
+        if (calls[i] == name) return i;
+    return calls.size();
+}
+
+int asyncCompletionCases(JsonObjectConst root)
+{
+    int checked = 0;
+    Focus focus(root);
+    focus.device().validator = [](JsonObjectConst) { return true; };
+    focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_PENDING; };
+
+    context() = "B2: a stale or unknown token completes nothing";
+    focus.executor().deliver(commandOperation(43U, "{\"to\":1}"));
+    const uint32_t first = focus.device().lastToken;
+    V11_CHECK(first != 0U && focus.executor().busy() && focus.acks() == "{43 accepted}", focus.acks());
+    focus.step("{}");
+    V11_CHECK(!focus.executor().completeFunction(first + 1U, NIVALO_FUNCTION_SUCCEEDED), "unknown token accepted");
+    V11_CHECK(!focus.executor().completeFunction(0U, NIVALO_FUNCTION_SUCCEEDED), "zero token accepted");
+    V11_CHECK(!focus.executor().completeFunction(first, NIVALO_FUNCTION_PENDING), "pending is not a completion");
+    V11_CHECK(focus.device().acks.empty() && focus.device().journal.phase == NIVALO_PHASE_CLAIMED &&
+                  focus.executor().busy(),
+              "a rejected completion changed the journal");
+    V11_CHECK(focus.executor().completeFunction(first, NIVALO_FUNCTION_SUCCEEDED) && !focus.executor().busy() &&
+                  focus.acks() == "{43 succeeded}",
+              focus.acks());
+    checked++;
+
+    context() = "B2: a late duplicate completion of A cannot finish B";
+    focus.step("{\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\"}}");
+    focus.executor().deliver(commandOperation(44U, "{\"to\":2}"));
+    const uint32_t second = focus.device().lastToken;
+    V11_CHECK(second != first && focus.executor().busy(), "second operation not running");
+    focus.step("{}");
+    V11_CHECK(!focus.executor().completeFunction(first, NIVALO_FUNCTION_FAILED), "A's token completed B");
+    V11_CHECK(focus.device().acks.empty() && focus.device().journal.seq == 44U &&
+                  focus.device().journal.phase == NIVALO_PHASE_CLAIMED,
+              "B's claim was overwritten");
+    V11_CHECK(focus.executor().completeFunction(second, NIVALO_FUNCTION_SUCCEEDED) && focus.acks() == "{44 succeeded}",
+              focus.acks());
+    checked++;
+
+    context() = "B2: busy ends only once the terminal result is durable";
+    focus.step("{\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\"}}");
+    focus.executor().deliver(commandOperation(45U, "{\"to\":3}"));
+    const uint32_t third = focus.device().lastToken;
+    focus.step("{\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\"}}");
+    focus.device().failTerminalWrite = true;
+    V11_CHECK(!focus.executor().completeFunction(third, NIVALO_FUNCTION_SUCCEEDED), "undurable completion accepted");
+    V11_CHECK(focus.executor().busy() && focus.executor().blocked() && focus.device().acks.empty() &&
+                  focus.device().journal.phase == NIVALO_PHASE_CLAIMED,
+              "busy released or result ACKed before it was durable");
+    focus.executor().deliver(commandOperation(46U, "{\"to\":4}"));
+    V11_CHECK(focus.device().handlerCalls == 0 && focus.device().acks.empty(), "a new operation started");
+    checked++;
+    return checked;
+}
+
+int argumentCases(JsonObjectConst root)
+{
+    int checked = 0;
+    context() = "H3: a value just below a threshold reaches validator and handler unchanged";
+    {
+        Focus focus(root);
+        double validated = -1.0, handled = -1.0;
+        focus.device().validator = [&validated](JsonObjectConst arguments) {
+            validated = arguments["setpoint"].as<double>();
+            return arguments["setpoint"].is<double>() && validated < 1.0;
+        };
+        focus.device().customHandler = [&handled](JsonObjectConst arguments) {
+            handled = arguments["setpoint"].as<double>();
+            return NIVALO_FUNCTION_SUCCEEDED;
+        };
+        const NivaloOperation operation = commandOperation(43U, "{\"setpoint\":0.9999999999}");
+        V11_CHECK(std::string(operation.arguments) == "{\"setpoint\":0.9999999999}", "argument bytes changed");
+        focus.executor().deliver(operation);
+        const double sent = std::strtod("0.9999999999", NULL);
+        V11_CHECK(focus.acks() == "{43 accepted}{43 succeeded}", focus.acks());
+        V11_CHECK(validated == sent && handled == sent && handled < 1.0,
+                  "validator saw " << validated << ", handler saw " << handled);
+        checked++;
+    }
+
+    context() = "H3: a non-finite value is refused before the claim";
+    {
+        Focus focus(root);
+        focus.device().validator = [](JsonObjectConst) { return true; };
+        focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+        focus.executor().deliver(commandOperation(43U, "{\"setpoint\":1e999}"));
+        V11_CHECK(focus.acks() == "{43 failed invalid_command}" && focus.device().handlerCalls == 0 &&
+                      indexOf(focus.device().calls, "claim") == focus.device().calls.size(),
+                  focus.acks());
+        checked++;
+    }
+
+    context() = "H3: unrepresentable numbers";
+    {
+        NivaloPreparedArguments arguments;
+        const char *const refused[] = {"{\"v\":1e999}", "{\"v\":-1e999}", "{\"v\":1e-999}", "{\"v\":[1,2e400]}",
+                                       "{\"v\":99999999999999999999}", "{\"v\":-9223372036854775809}"};
+        for (const char *text : refused)
+            V11_CHECK(!arguments.prepare(text, std::strlen(text)), "accepted " << text);
+        const char *const accepted[] = {"{\"v\":0}", "{\"v\":-0.0}", "{\"v\":18446744073709551615}",
+                                        "{\"v\":-9223372036854775808}", "{\"v\":{\"w\":[1.5,\"x\",true]}}", "{}"};
+        for (const char *text : accepted)
+            V11_CHECK(arguments.prepare(text, std::strlen(text)), "refused " << text);
+        checked++;
+    }
+    return checked;
+}
+
+int orderingCases(JsonObjectConst root)
+{
+    int checked = 0;
+    context() = "H7: the handler call directly follows the final clock reading";
+    Focus focus(root);
+    focus.device().validator = [](JsonObjectConst) { return true; };
+    focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+    focus.executor().deliver(commandOperation(43U, "{\"to\":1}"));
+    const std::vector<std::string> &calls = focus.device().calls;
+    const size_t prepare = indexOf(calls, "prepare"), claim = indexOf(calls, "claim"), invoke = indexOf(calls, "invoke");
+    std::string trace;
+    for (const std::string &call : calls) trace += call + " ";
+    V11_CHECK(prepare < claim && claim < invoke && invoke < calls.size(), trace);
+    V11_CHECK(invoke > 0U && calls[invoke - 1U] == "clock", "work between the final reading and the handler: " << trace);
+    checked++;
+    return checked;
+}
+
+// The signed OTA job of the vectors (accepted by the default device).
+std::string otaPayload(JsonObjectConst root, std::string *id)
+{
+    for (JsonObjectConst testCase : root["cases"].as<JsonArrayConst>())
+        for (JsonObjectConst step : testCase["steps"].as<JsonArrayConst>())
+            if (std::strcmp(str(step["route"]), "ota") == 0 && std::strcmp(str(step["handler"]), "downloading") == 0)
+            {
+                *id = str(step["commandId"]);
+                return compact(step["payload"]);
+            }
+    V11_CHECK(false, "no OTA job in the vectors");
+    return "";
+}
+
+int pendingCleanupCases(JsonObjectConst root)
+{
+    int checked = 0;
+    std::string id;
+    const std::string payload = otaPayload(root, &id);
+    // Downloaded and pending, then the activation reading is past expiresAt.
+    const char ExpiredAfterPending[] = "{\"handler\":\"installed\",\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\","
+                                       "\"start\":{\"valid\":true,\"now\":\"2026-11-24T14:00:01Z\",\"elapsed\":7171}}}";
+
+    context() = "M11: a failed terminal write keeps the pending record";
+    {
+        Focus focus(root);
+        focus.step(ExpiredAfterPending);
+        focus.device().failTerminalWrite = true;
+        focus.executor().deliver(parsed("ota", id, payload));
+        V11_CHECK(focus.device().pendingStored && focus.device().journal.phase == NIVALO_PHASE_CLAIMED &&
+                      focus.device().activations == 0 && focus.acks() == "{43 accepted}",
+                  "pending discarded before the result was durable: " << focus.acks());
+        focus.device().failTerminalWrite = false;
+        focus.harness->boot(NULL, false);
+        V11_CHECK(focus.device().journal.phase == NIVALO_PHASE_DONE && !focus.device().pendingStored &&
+                      resultText(focus.device().journal.result) == "indeterminate/execution_unknown",
+                  "boot did not reconcile with the kept evidence: " << resultText(focus.device().journal.result));
+        checked++;
+    }
+
+    context() = "M11: an activation refusal whose result cannot be stored keeps the pending record";
+    {
+        Focus focus(root);
+        focus.step("{\"handler\":\"activationRejected\",\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\","
+                   "\"start\":{\"valid\":true,\"now\":\"2026-11-24T12:10:00Z\",\"elapsed\":570}}}");
+        focus.device().failTerminalWrite = true;
+        focus.executor().deliver(parsed("ota", id, payload));
+        V11_CHECK(focus.device().activations == 1 && focus.device().pendingStored &&
+                      focus.device().journal.phase == NIVALO_PHASE_CLAIMED,
+                  "pending discarded before the result was durable");
+        checked++;
+    }
+
+    context() = "M11: a reset after the durable result only leaves a record to clear";
+    {
+        Focus focus(root);
+        focus.step(ExpiredAfterPending);
+        focus.device().powerCutOnClearPending = true;
+        try
+        {
+            focus.executor().deliver(parsed("ota", id, payload));
+            V11_CHECK(false, "the clear was not reached");
+        }
+        catch (const PowerCut &)
+        {
+        }
+        V11_CHECK(focus.device().pendingStored && resultText(focus.device().journal.result) == "failed/expired" &&
+                      focus.acks() == "{43 accepted}{43 failed expired}",
+                  focus.acks());
+        focus.device().powerCutOnClearPending = false;
+        focus.harness->boot(NULL, false);
+        V11_CHECK(!focus.device().pendingStored && resultText(focus.device().journal.result) == "failed/expired",
+                  "boot changed a durable result");
+        checked++;
+    }
+    return checked;
+}
+
+int firmwarePlacementCases(JsonObjectConst root)
+{
+    int checked = 0;
+    context() = "M1: firmware metadata on a command is invalid, with no effect";
+    {
+        Focus focus(root);
+        focus.device().validator = [](JsonObjectConst) { return true; };
+        focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+        const NivaloOperation operation = commandOperation(43U, "{\"to\":1}", FirmwareMember);
+        V11_CHECK(!operation.valid, "firmware placement accepted");
+        focus.executor().deliver(operation);
+        V11_CHECK(focus.acks() == "{43 failed invalid_command}" && focus.device().handlerCalls == 0, focus.acks());
+        checked++;
+    }
+    context() = "M1: firmware metadata on an OTA job is invalid, with no effect";
+    {
+        Focus focus(root);
+        focus.step("{\"handler\":\"installed\",\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\"}}");
+        std::string id;
+        const std::string payload = otaPayload(root, &id);
+        const NivaloOperation operation = parsed("ota", id, payload, FirmwareMember);
+        V11_CHECK(!operation.valid, "firmware placement accepted");
+        focus.executor().deliver(operation);
+        V11_CHECK(focus.acks() == "{43 failed invalid_command}" && focus.device().activations == 0 &&
+                      !focus.device().pendingStored,
+                  focus.acks());
+        checked++;
+    }
+    return checked;
+}
+} // namespace
 int main()
 {
     std::unique_ptr<DynamicJsonDocument> document = loadFixture("fixtures/v1.1/vectors/command-execution.json");
@@ -795,5 +1148,10 @@ int main()
     int checked = clockValidityCases(root);
     checked += fingerprintCases(root);
     checked += runCases(root);
+    checked += asyncCompletionCases(root);
+    checked += argumentCases(root);
+    checked += orderingCases(root);
+    checked += pendingCleanupCases(root);
+    checked += firmwarePlacementCases(root);
     return finish("command-execution vectors", checked);
 }

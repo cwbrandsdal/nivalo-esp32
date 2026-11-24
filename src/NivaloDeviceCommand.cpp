@@ -1,7 +1,5 @@
 #include "NivaloDevice.h"
 
-#include <esp_task_wdt.h>
-
 // PubSubClient hands over its own buffer and reuses it as soon as the callback returns. The
 // downlink is scanned, fingerprinted and copied here, inside the callback, and executed later
 // from loop(): the executor never runs inside PubSubClient and the PUBACK goes out at once.
@@ -44,10 +42,7 @@ void NivaloDevice::processInbox()
 
 void NivaloDevice::serviceWhileBusy()
 {
-    if (_watchdogEnabled)
-    {
-        esp_task_wdt_reset();
-    }
+    feedWatchdog();
     serviceConnection();
     processInbox();
     drainAcks();
@@ -82,8 +77,11 @@ NivaloClockReading NivaloDevice::Platform::readClock()
 
 void NivaloDevice::Platform::publishAck(const NivaloAck &ack)
 {
-    if (!_device.publishAckNow(ack))
+    char bytes[AckEnvelopeCapacity];
+    uint16_t length = 0U;
+    if (!_device.publishAck(ack, bytes, sizeof(bytes), &length))
     {
-        _device.queueAck(ack);
+        // Built but not sent: the retry sends the same bytes. Not built (no clock): built later.
+        _device.queueAck(ack, bytes, length);
     }
 }

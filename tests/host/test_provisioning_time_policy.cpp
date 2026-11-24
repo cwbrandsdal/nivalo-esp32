@@ -13,11 +13,6 @@ void require(bool condition)
 
 int main()
 {
-    const uint64_t minimumEpoch = 1704067200ULL;
-    require(!NivaloProvisioningTimePolicy::permitsTls(-1LL, minimumEpoch));
-    require(!NivaloProvisioningTimePolicy::permitsTls(0ULL, minimumEpoch));
-    require(!NivaloProvisioningTimePolicy::permitsTls(minimumEpoch - 1ULL, minimumEpoch));
-    require(NivaloProvisioningTimePolicy::permitsTls(minimumEpoch, minimumEpoch));
 
     require(!NivaloProvisioningTimePolicy::elapsed(14999U, 0U, 15000U));
     require(NivaloProvisioningTimePolicy::elapsed(15000U, 0U, 15000U));

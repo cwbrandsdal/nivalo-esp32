@@ -85,7 +85,7 @@ int messageCases()
         {
             V11_CHECK(outcome == NIVALO_DOWNLINK_DROPPED, "a " << rule << " violation was identified");
         }
-        else if (rule == "lifetime" || rule == "signature-encoding")
+        else if (rule == "lifetime" || rule == "signature-encoding" || rule == "firmware-placement")
         {
             V11_CHECK(outcome == NIVALO_DOWNLINK_IDENTIFIED && !operation.valid,
                       "a " << rule << " violation must be identified and rejected as invalid_command");

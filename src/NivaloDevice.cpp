@@ -3,7 +3,6 @@
 
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <esp_sntp.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
@@ -11,56 +10,6 @@
 namespace
 {
 static constexpr size_t UartMessageJsonCapacity = 2048;
-
-// Every completed SNTP synchronisation, with the monotonic time it happened at (section 9). The
-// observer is installed before setup(), so synchronisations made during provisioning count.
-struct TimeSync
-{
-    int64_t utcMs;
-    int64_t monotonicUs;
-};
-portMUX_TYPE syncLock = portMUX_INITIALIZER_UNLOCKED;
-TimeSync syncQueue[4];
-uint8_t syncCount = 0U;
-
-void onTimeSync(struct timeval *tv)
-{
-    if (tv == NULL)
-    {
-        return;
-    }
-    TimeSync sync;
-    sync.monotonicUs = esp_timer_get_time();
-    sync.utcMs = (int64_t)tv->tv_sec * 1000LL + (int64_t)tv->tv_usec / 1000LL;
-    portENTER_CRITICAL(&syncLock);
-    if (syncCount == sizeof(syncQueue) / sizeof(syncQueue[0]))
-    {
-        memmove(&syncQueue[0], &syncQueue[1], sizeof(TimeSync) * (syncCount - 1U));
-        syncCount--;
-    }
-    syncQueue[syncCount++] = sync;
-    portEXIT_CRITICAL(&syncLock);
-}
-
-bool takeTimeSync(TimeSync *sync)
-{
-    bool taken = false;
-    portENTER_CRITICAL(&syncLock);
-    if (syncCount > 0U)
-    {
-        *sync = syncQueue[0];
-        memmove(&syncQueue[0], &syncQueue[1], sizeof(TimeSync) * (syncCount - 1U));
-        syncCount--;
-        taken = true;
-    }
-    portEXIT_CRITICAL(&syncLock);
-    return taken;
-}
-
-struct TimeSyncObserver
-{
-    TimeSyncObserver() { sntp_set_time_sync_notification_cb(onTimeSync); }
-} timeSyncObserver;
 } // namespace
 
 int64_t NivaloDevice::monotonicUs() const
@@ -68,15 +17,22 @@ int64_t NivaloDevice::monotonicUs() const
     return esp_timer_get_time();
 }
 
+void NivaloDevice::onTrustedSync(void *context, int64_t utcMs, int64_t monotonicUs)
+{
+    static_cast<NivaloDevice *>(context)->_executor.onTrustedSync(utcMs, monotonicUs);
+}
+
 void NivaloDevice::pumpClock()
 {
-    TimeSync sync;
-    while (takeTimeSync(&sync))
+    // Trusted synchronisations reach the executor through onTrustedSync, whoever pumps.
+    nivaloPumpSystemClock();
+}
+
+void NivaloDevice::feedWatchdog()
+{
+    if (_watchdogEnabled)
     {
-        if (_clock.onSync(sync.utcMs, sync.monotonicUs))
-        {
-            _executor.onTrustedSync(sync.utcMs, sync.monotonicUs);
-        }
+        esp_task_wdt_reset();
     }
 }
 
@@ -100,19 +56,18 @@ bool NivaloDevice::nextMessageId(char output[37])
 
 void NivaloDevice::loop()
 {
-    if (_watchdogEnabled)
-    {
-        esp_task_wdt_reset();
-    }
+    feedWatchdog();
     _statusPixel.pulse();
     serviceConnection();
     if (!_connection.connected())
     {
         _statusPixel.set(255, 0, 0);
     }
+    serviceCompletion();
     processInbox();
     drainAcks();
     serviceHeartbeat();
+    serviceCatalogRetry();
 #if NIVALO_HAS_SECONDARY_MCU
     drainNivaloLink();
 #endif
@@ -137,13 +92,16 @@ bool NivaloDevice::advanceConnection()
     return true;
 }
 
-bool NivaloDevice::buildWill(void *context, String &will)
+const char *NivaloDevice::buildWill(void *context)
 {
+    // Built straight into the device's own envelope buffer, which nothing else touches before
+    // CONNECT has been written; no heap copy can fail in between.
     NivaloDevice &device = *static_cast<NivaloDevice *>(context);
     if (!device.clockValid() || !device.advanceConnection())
     {
-        return false;
+        return NULL;
     }
+    device.feedWatchdog();
     char payload[128];
     char messageId[37];
     const size_t length = nivaloEndPayload(device._epoch, false, payload, sizeof(payload));
@@ -151,12 +109,7 @@ bool NivaloDevice::buildWill(void *context, String &will)
     const size_t envelope = nivaloBuildEnvelope(device._deviceId.c_str(), messageId,
                                                 device._clock.read(device.monotonicUs()).utcMs, NULL, NULL, payload,
                                                 length, device._envelope, sizeof(device._envelope));
-    if (length == 0U || envelope == 0U)
-    {
-        return false;
-    }
-    will = device._envelope;
-    return true;
+    return length == 0U || envelope == 0U ? NULL : device._envelope;
 }
 
 void NivaloDevice::serviceConnection()
@@ -187,10 +140,11 @@ void NivaloDevice::onConnected()
     if (length == 0U || !publishEnvelope(_topics.availability(), payload, length, NULL, &_firmware, true))
     {
         Serial.println("Nivalo: birth publish failed; reconnecting");
-        _connection.disconnect();
+        // No DISCONNECT: the broker publishes the registered Will.
+        _connection.drop();
         return;
     }
-    publishCatalog();
+    (void)publishCatalog();
     _executor.republishResult();
     drainAcks();
     flushTelemetryBuffer();
@@ -240,17 +194,23 @@ void NivaloDevice::serviceHeartbeat()
 
 void NivaloDevice::shutdown()
 {
+    bool ended = false;
     if (_connection.connected() && clockValid())
     {
         char payload[128];
         const size_t length = nivaloEndPayload(_epoch, true, payload, sizeof(payload));
-        if (length > 0U)
-        {
-            (void)publishEnvelope(_topics.availability(), payload, length, NULL, NULL, true);
-            _connection.client().loop();
-        }
+        ended = length > 0U && publishEnvelope(_topics.availability(), payload, length, NULL, NULL, true);
     }
-    _connection.disconnect();
+    if (ended)
+    {
+        // The retained end was written: DISCONNECT discards the Will (section 8.1).
+        _connection.disconnect();
+    }
+    else
+    {
+        // Without the end, closing the transport lets the broker publish the prebuilt Will.
+        _connection.drop();
+    }
 }
 
 void NivaloDevice::serviceUart()

@@ -6,7 +6,8 @@
 #define NIVALO_API_ORIGIN "https://iot-api.nivalo.io"
 #define NIVALO_DEVICE_CLAIM_URL NIVALO_API_ORIGIN "/v1/device-claims/exchange"
 #define NIVALO_SETUP_BUTTON_PIN 0
-#define NIVALO_ALLOW_UNENCRYPTED_NVS_FOR_LOCAL_DEVELOPMENT 0
+// 1 accepts plain NVS for credentials (readable with physical access; see the README).
+#define NIVALO_ALLOW_PLAINTEXT_NVS 0
 #define NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE 0
 
 // Local development only: use NIVALO_MQTT_TRANSPORT_PLAINTEXT_LOCAL with a

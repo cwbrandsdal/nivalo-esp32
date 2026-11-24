@@ -1,6 +1,7 @@
 #include "NivaloDeviceStore.h"
 
 #include <new>
+#include <string.h>
 
 namespace
 {
@@ -137,18 +138,28 @@ bool NivaloDeviceStore::clearPending()
     return !_preferences.isKey(PendingKey);
 }
 
-uint32_t NivaloDeviceStore::loadFloor(const char *productId)
+NivaloStoreRead NivaloDeviceStore::loadFloor(const char *productId, uint32_t *floor)
 {
+    *floor = 0U;
     uint8_t blob[NivaloFloorBlobBytes];
     bool present = false;
     const size_t length = readBlob(FloorKey, blob, sizeof(blob), &present);
-    NivaloFloorRecord record;
-    if (!present || !nivaloDecodeFloor(blob, length, &record) || productId == NULL ||
-        strcmp(record.productId, productId) != 0)
+    if (!present)
     {
-        return 0U;
+        return _opened ? NIVALO_STORE_MISSING : NIVALO_STORE_CORRUPT;
     }
-    return record.floor;
+    NivaloFloorRecord record;
+    if (!nivaloDecodeFloor(blob, length, &record))
+    {
+        return NIVALO_STORE_CORRUPT;
+    }
+    if (productId == NULL || strcmp(record.productId, productId) != 0)
+    {
+        // The floor of another product (a USB flash into the other environment).
+        return NIVALO_STORE_MISSING;
+    }
+    *floor = record.floor;
+    return NIVALO_STORE_OK;
 }
 
 bool NivaloDeviceStore::writeFloor(const char *productId, uint32_t floor)
@@ -196,27 +207,59 @@ bool NivaloDeviceStore::writeCatalog(const NivaloCatalogState &state)
     return written;
 }
 
-bool NivaloDeviceStore::prepareIdentity(const char *deviceId, bool newlyClaimed)
+NivaloIdentityAdmission NivaloDeviceStore::admitIdentity(const char *deviceId, bool hasActiveIdentity)
+{
+    if (!begin() || !nivaloIsUuid(deviceId))
+    {
+        return NIVALO_IDENTITY_REFUSED;
+    }
+    NivaloJournal journal;
+    const NivaloStoreRead journalRead = loadJournal(&journal);
+    uint32_t boot = 0U;
+    const NivaloStoreRead bootRead = loadBoot(&boot);
+    if (journalRead == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0)
+    {
+        // Same device ID: its history stays. Without a readable boot counter it must not connect,
+        // and reseeding it could repeat presence epochs.
+        return bootRead == NIVALO_STORE_OK ? NIVALO_IDENTITY_KEEP : NIVALO_IDENTITY_REFUSED;
+    }
+    if (!hasActiveIdentity && journalRead == NIVALO_STORE_MISSING && bootRead == NIVALO_STORE_MISSING)
+    {
+        return NIVALO_IDENTITY_FIRST_ENROLLMENT;
+    }
+    // Lost records of an identity that exists, or another device ID's history: manually supplied
+    // credentials cannot prove that this device ID never executed anything on this unit.
+    return NIVALO_IDENTITY_REFUSED;
+}
+
+bool NivaloDeviceStore::initializeIdentity(const char *deviceId)
 {
     if (!begin() || !nivaloIsUuid(deviceId))
     {
         return false;
     }
     NivaloJournal journal;
-    const NivaloStoreRead read = loadJournal(&journal);
-    const bool keep = read == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0;
-    if (!keep && (read != NIVALO_STORE_CORRUPT || newlyClaimed))
+    const bool keep = loadJournal(&journal) == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0;
+    if (!keep && !writeJournal(nivaloFreshJournal(deviceId)))
     {
-        if (!writeJournal(nivaloFreshJournal(deviceId)))
-        {
-            return false;
-        }
+        return false;
     }
     uint32_t boot = 0U;
-    const NivaloStoreRead bootRead = loadBoot(&boot);
-    if (bootRead == NIVALO_STORE_MISSING || (bootRead == NIVALO_STORE_CORRUPT && newlyClaimed))
+    if (loadBoot(&boot) != NIVALO_STORE_OK && !writeBoot(0U))
     {
-        return writeBoot(0U);
+        return false;
     }
-    return true;
+    return identityReady(deviceId);
+}
+
+bool NivaloDeviceStore::identityReady(const char *deviceId)
+{
+    if (!begin() || !nivaloIsUuid(deviceId))
+    {
+        return false;
+    }
+    NivaloJournal journal;
+    uint32_t boot = 0U;
+    return loadJournal(&journal) == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0 &&
+           loadBoot(&boot) == NIVALO_STORE_OK;
 }

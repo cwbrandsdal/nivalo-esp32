@@ -20,8 +20,8 @@ browser build is therefore deliberately an **evaluation artifact**, suitable
 for the connected test board but not for customer or production credentials.
 Only this environment pairs `NIVALO_BROWSER_FLASH_ARTIFACT=1` with
 `NIVALO_BROWSER_FLASH_ALLOW_UNENCRYPTED_NVS_FOR_EVALUATION=1`. It reaches the
-setup AP on a fresh board using the existing unencrypted local-development NVS
-exception and identifies itself to the platform as
+setup AP on a fresh board using plain NVS (`allowPlaintextNvs`) and identifies
+itself to the platform as
 `adafruit-feather-esp32-browser-evaluation`.
 
 The environment includes only the checked-in
@@ -34,8 +34,11 @@ The application embeds the exact
 `NIVALO-PROVISIONING-STORAGE-POLICY-V1:evaluation-unencrypted-nvs` marker. The
 post-build inspector requires that marker exactly once and emits
 `"credentialStoragePolicy":"evaluation-unencrypted-nvs"` with
-`"productionEligible":false`. Removing the guard or marker fails the build;
-ordinary builds retain the encrypted-storage fail-closed default.
+`"productionEligible":false`. Removing the guard or marker fails the build.
+The directly flashed staging and production builds also use plain NVS, by the
+owner's decision for the current unencrypted boards (`NIVALO_ALLOW_PLAINTEXT_NVS`;
+README, "Credential storage"); the library itself still fails closed without
+NVS encryption unless a build opts in.
 
 A production browser artifact requires a separately reviewed encrypted-board
 enablement path. Flash-encryption eFuses are irreversible and this repository

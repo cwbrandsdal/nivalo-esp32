@@ -9,7 +9,10 @@
 
 namespace
 {
-const size_t OpCapacity = 1536U;
+// One upsert at its largest: a 64-byte name and a function definition whose displayName (128
+// bytes), description (256) and argumentExample (256) all double under JSON escaping, plus the
+// fixed members, is about 1550 bytes.
+const size_t OpCapacity = 2048U;
 const size_t MaxOpsPerPacket = 8U;
 
 const char *kindName(uint8_t kind) { return kind == NIVALO_KIND_FUNCTION ? "function" : "variable"; }
@@ -31,15 +34,39 @@ bool isLive(const NivaloCatalogState &state, uint8_t kind, const char *name)
     return false;
 }
 
-void appendRetired(NivaloCatalogState &state, const NivaloCatalogName &entry)
+// Every retirement stays: dropping one before it was reported would leave the name live on the
+// server, where absence means no change. False when the budget is exhausted.
+bool appendRetired(NivaloCatalogState &state, const NivaloCatalogName &entry)
 {
     if (state.retiredCount == NivaloCatalogMaxRetired)
     {
-        // Oldest tombstone first out; the server keeps its tombstones for the device's lifetime.
-        memmove(&state.retired[0], &state.retired[1], sizeof(NivaloCatalogName) * (NivaloCatalogMaxRetired - 1U));
-        state.retiredCount--;
+        return false;
     }
     state.retired[state.retiredCount++] = entry;
+    return true;
+}
+
+// The refresh pairs a live name with its retired case twin in one packet (section 12.4). With two
+// retired twins the pairing is ambiguous and the server can reject the packet (name-collision).
+bool ambiguousCaseRename(const NivaloCatalogState &state)
+{
+    for (size_t i = 0U; i < state.liveCount; i++)
+    {
+        unsigned twins = 0U;
+        for (size_t r = 0U; r < state.retiredCount; r++)
+        {
+            if (state.retired[r].kind == state.live[i].kind &&
+                nivaloAsciiCaseEqual(state.retired[r].name, state.live[i].name))
+            {
+                twins++;
+            }
+        }
+        if (twins > 1U)
+        {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool writeUpsert(const NivaloCatalogSource &source, size_t index, char *output, size_t capacity, size_t *length)
@@ -237,18 +264,23 @@ NivaloCatalogDecision nivaloPlanCatalog(const NivaloCatalogSource &source, const
     {
         for (size_t i = 0U; i < stored->retiredCount; i++)
         {
-            if (!isLive(state, stored->retired[i].kind, stored->retired[i].name))
+            if (!isLive(state, stored->retired[i].kind, stored->retired[i].name) &&
+                !appendRetired(state, stored->retired[i]))
             {
-                appendRetired(state, stored->retired[i]);
+                return NIVALO_CATALOG_REFUSED;
             }
         }
         for (size_t i = 0U; i < stored->liveCount; i++)
         {
-            if (!isLive(state, stored->live[i].kind, stored->live[i].name))
+            if (!isLive(state, stored->live[i].kind, stored->live[i].name) && !appendRetired(state, stored->live[i]))
             {
-                appendRetired(state, stored->live[i]);
+                return NIVALO_CATALOG_REFUSED;
             }
         }
+    }
+    if (ambiguousCaseRename(state))
+    {
+        return NIVALO_CATALOG_REFUSED;
     }
     *next = state;
     return NIVALO_CATALOG_CHANGED;

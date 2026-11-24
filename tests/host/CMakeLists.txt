@@ -120,6 +120,7 @@ add_test(NAME nivalo_nivalolink_command_poll_policy_tests COMMAND nivalo_nivalol
 add_library(nivalo_v11 STATIC
     ../../src/NivaloWire.cpp
     ../../src/NivaloJsonStrict.cpp
+    ../../src/NivaloArguments.cpp
     ../../src/NivaloDownlink.cpp
     ../../src/NivaloClock.cpp
     ../../src/NivaloOtaPolicy.cpp
@@ -148,6 +149,15 @@ foreach(name wire execution ota catalog uplink)
     nivalo_warnings(nivalo_v11_${name}_tests)
     add_test(NAME nivalo_v11_${name}_tests COMMAND nivalo_v11_${name}_tests)
 endforeach()
+
+# The durable protocol state (NivaloDeviceStore) against a map-backed stand-in for Preferences, so
+# identity changes and unreadable records are exercised on the real store code.
+add_executable(nivalo_v11_store_tests test_v11_store.cpp ../../src/NivaloDeviceStore.cpp)
+target_include_directories(nivalo_v11_store_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fakes")
+target_link_libraries(nivalo_v11_store_tests PRIVATE nivalo_v11)
+target_compile_definitions(nivalo_v11_store_tests PRIVATE NIVALO_PROTOCOL_DIR="${NIVALO_PROTOCOL_DIR}")
+nivalo_warnings(nivalo_v11_store_tests)
+add_test(NAME nivalo_v11_store_tests COMMAND nivalo_v11_store_tests)
 
 # Every uplink the firmware builds is checked against the protocol's reference model.
 find_package(Python3 COMPONENTS Interpreter)

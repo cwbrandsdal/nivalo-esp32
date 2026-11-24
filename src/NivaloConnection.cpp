@@ -1,6 +1,7 @@
 #include "NivaloConnection.h"
 
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 
 namespace
 {
@@ -60,21 +61,64 @@ const char *NivaloConnection::defaultCaCertificate()
 }
 
 
-NivaloConnection::NivaloConnection() : _mqtt(_secureClient) {}
-void NivaloConnection::useTls(const char *caCertificate) { _secureClient.setCACert(caCertificate); _mqtt.setClient(_secureClient); }
-void NivaloConnection::usePlaintext() { _mqtt.setClient(_plainClient); }
+namespace
+{
+bool copied(String &target, const char *source)
+{
+    target = source;
+    return source != NULL && target.length() == strlen(source);
+}
 
-void NivaloConnection::configure(const char *host, uint16_t port, const char *clientId,
+size_t field(const String &value)
+{
+    return 2U + value.length();
+}
+} // namespace
+
+NivaloConnection::NivaloConnection() : _mqtt(_secureClient) {}
+
+void NivaloConnection::useTls(const char *caCertificate)
+{
+    _plaintext = false;
+    _secureClient.setCACert(caCertificate);
+    _secureClient.setTimeout(NivaloTcpConnectTimeoutS);
+    _secureClient.setHandshakeTimeout(NivaloTlsHandshakeTimeoutS);
+    _mqtt.setClient(_secureClient);
+}
+
+void NivaloConnection::usePlaintext()
+{
+    _plaintext = true;
+    _plainClient.setTimeout(NivaloTcpConnectTimeoutS);
+    _mqtt.setClient(_plainClient);
+}
+
+bool NivaloConnection::reserve(uint16_t bufferBytes)
+{
+    return _mqtt.setBufferSize(bufferBytes) && _mqtt.getBufferSize() == bufferBytes;
+}
+
+bool NivaloConnection::configure(const char *host, uint16_t port, const char *clientId,
                                  const char *username, const char *password,
                                  const char *commandsFilter, const char *otaFilter, const char *availabilityTopic,
                                  NivaloWillBuilder willBuilder, void *willContext)
 {
-    _host = host; _port = port; _clientId = clientId; _username = username; _password = password;
-    _commandsFilter = commandsFilter; _otaFilter = otaFilter; _availabilityTopic = availabilityTopic;
-    _willBuilder = willBuilder; _willContext = willContext;
+    _willBuilder = NULL;
+    if (!copied(_host, host) || !copied(_clientId, clientId) || !copied(_username, username) ||
+        !copied(_password, password) || !copied(_commandsFilter, commandsFilter) || !copied(_otaFilter, otaFilter) ||
+        !copied(_availabilityTopic, availabilityTopic))
+    {
+        return false;
+    }
+    _port = port;
+    _willBuilder = willBuilder;
+    _willContext = willContext;
     _mqtt.setServer(_host.c_str(), _port);
     _mqtt.setKeepAlive(60);
+    // Bounds the CONNACK wait and every blocking read of one connect.
+    _mqtt.setSocketTimeout(NivaloMqttSocketTimeoutS);
     _retryPolicy.reset();
+    return true;
 }
 
 void NivaloConnection::service(unsigned long now)
@@ -82,19 +126,25 @@ void NivaloConnection::service(unsigned long now)
     if (_mqtt.connected()) { _mqtt.loop(); return; }
     const uint32_t nowMs = static_cast<uint32_t>(now);
     if (_willBuilder == NULL || !_retryPolicy.isAttemptDue(nowMs)) { return; }
-    String will;
-    if (!_willBuilder(_willContext, will))
+    const char *will = _willBuilder(_willContext);
+    // The whole CONNECT (fixed header, variable header, client ID, Will topic and message, user
+    // name, password) must fit the packet buffer, or PubSubClient would refuse it mid-write.
+    const size_t connectBytes = will == NULL ? 0U : 5U + 10U + field(_clientId) + field(_availabilityTopic) +
+                                                        2U + strlen(will) + field(_username) + field(_password);
+    if (will == NULL || connectBytes > _mqtt.getBufferSize())
     {
         _retryPolicy.onFailure(nowMs, esp_random());
         return;
     }
     const bool ok = _mqtt.connect(_clientId.c_str(), _username.c_str(), _password.c_str(),
-                                  _availabilityTopic.c_str(), 1, true, will.c_str(), true);
+                                  _availabilityTopic.c_str(), 1, true, will, true);
     if (!ok)
     {
         _retryPolicy.onFailure(nowMs, esp_random());
         return;
     }
+    // CONNECT took its bounded share of the watchdog budget; the SUBSCRIBE writes get their own.
+    (void)esp_task_wdt_reset();
     const bool commands = _mqtt.subscribe(_commandsFilter.c_str(), 1);
     const bool ota = commands && _mqtt.subscribe(_otaFilter.c_str(), 1);
     if (!ota)
@@ -111,6 +161,10 @@ void NivaloConnection::service(unsigned long now)
 bool NivaloConnection::connected() { return _mqtt.connected(); }
 bool NivaloConnection::publish(const char *topic, const char *payload, bool retained) { return _mqtt.connected() && _mqtt.publish(topic, payload, retained); }
 void NivaloConnection::disconnect() { if (_mqtt.connected()) { _mqtt.disconnect(); } }
+void NivaloConnection::drop()
+{
+    if (_plaintext) { _plainClient.stop(); } else { _secureClient.stop(); }
+}
 PubSubClient &NivaloConnection::client() { return _mqtt; }
 bool NivaloConnection::takeJustConnected() { bool value = _justConnected; _justConnected = false; return value; }
 unsigned long NivaloConnection::nextAttemptAt() const { return _retryPolicy.nextAttemptAt(); }

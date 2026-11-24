@@ -329,7 +329,7 @@ NivaloOtaPrecheck nivaloOtaPrecheck(const NivaloOtaDevice &device, const NivaloO
     }
     const uint32_t floor =
         device.runningSecurityVersion > device.committedFloor ? device.runningSecurityVersion : device.committedFloor;
-    if (operation.manifest.securityVersion <= floor)
+    if (!device.floorReadable || operation.manifest.securityVersion <= floor)
     {
         return NIVALO_OTA_PRECHECK_SECURITY_VERSION;
     }
@@ -360,7 +360,9 @@ void NivaloImageDescriptorScanner::reset()
     {
         _magic[i] = (uint8_t)(MaskedMagic[i] ^ MagicMask);
     }
+    _collected = 0U;
     _matched = 0U;
+    _magicCount = 0U;
     _count = 0U;
     _conflict = false;
     _identity = NivaloImageIdentity();
@@ -371,28 +373,38 @@ void NivaloImageDescriptorScanner::update(const uint8_t *data, size_t length)
     for (size_t i = 0U; data != NULL && i < length; i++)
     {
         const uint8_t byte = data[i];
-        if (_matched < sizeof(_magic))
+        // Every occurrence of the magic is counted, also one that starts inside a candidate. The
+        // magic's bytes are pairwise distinct, so a mismatch can only restart a match at byte 0.
+        bool magicEnds = false;
+        if (byte == _magic[_matched])
         {
-            // The magic's bytes are pairwise distinct, so a mismatch can only restart at byte 0.
-            if (byte == _magic[_matched])
+            _matched++;
+            if (_matched == sizeof(_magic))
             {
-                _buffer[_matched++] = byte;
+                _magicCount++;
+                _matched = 0U;
+                magicEnds = true;
             }
-            else
-            {
-                _matched = byte == _magic[0] ? 1U : 0U;
-                if (_matched == 1U)
-                {
-                    _buffer[0] = byte;
-                }
-            }
-            continue;
         }
-        _buffer[_matched++] = byte;
-        if (_matched == NivaloImageDescriptorBytes)
+        else
         {
-            candidate();
-            _matched = 0U;
+            _matched = byte == _magic[0] ? 1U : 0U;
+        }
+
+        if (_collected > 0U)
+        {
+            _buffer[_collected++] = byte;
+            if (_collected == NivaloImageDescriptorBytes)
+            {
+                candidate();
+                _collected = 0U;
+            }
+        }
+        else if (magicEnds)
+        {
+            // A candidate starts with the magic that just ended.
+            memcpy(_buffer, _magic, sizeof(_magic));
+            _collected = sizeof(_magic);
         }
     }
 }
@@ -433,7 +445,7 @@ void NivaloImageDescriptorScanner::candidate()
 
 bool NivaloImageDescriptorScanner::identity(NivaloImageIdentity *identity) const
 {
-    if (_count != 1U || _conflict)
+    if (_count != 1U || _magicCount != 1U || _conflict)
     {
         return false;
     }

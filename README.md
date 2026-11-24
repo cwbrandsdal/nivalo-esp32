@@ -103,15 +103,23 @@ On first boot it starts a `Nivalo-Setup-xxxxxx` access point protected by the
 unit's setup code (below), a wildcard DNS captive portal and a non-blocking web
 server. The user submits Wi-Fi plus an eight-character
 one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Once connected,
-provisioning starts SNTP and waits for a valid UTC clock using bounded attempts
+provisioning starts SNTP and waits for a valid clock using bounded attempts
 with backoff; claim HTTPS and MQTT identity validation fail closed until then.
+"Valid" is the device clock of the MQTT session (an SNTP synchronisation in this
+boot, at most 6 h old, no unrecovered backward step), shared by provisioning,
+the session and OTA; a plausible wall clock retained over a warm restart does
+not count.
 Before its first HTTPS request, the device generates an ECDSA P-256 proof key
-and a 32-byte MQTT credential and persists the entire pending attempt in encrypted Preferences.
+and a 32-byte MQTT credential and persists the entire pending attempt in
+Preferences (see "Credential storage" below).
 The request uses certificate-validating HTTPS and redirects are disabled. Claim codes,
 passwords, response bodies, and signatures are never printed.
 
 The response contains only a non-secret device/MQTT identity; the MQTT password
-never leaves the device. A lost response or reset reloads and retries the exact
+never leaves the device. The body is read into a fixed 3072-byte buffer and
+must match `device-claim-response.schema.json` exactly (canonical lowercase
+device UUID, DNS host, printable-ASCII client ID and user name of at most 128
+bytes, CA of at most 2048 bytes) before anything is probed or promoted. A lost response or reset reloads and retries the exact
 same attempt, allowing the server to return the same identity idempotently.
 Submitting the same still-pending code again reuses that attempt and its key
 material while allowing new Wi-Fi input; a different code creates a fresh
@@ -125,14 +133,35 @@ reconciles a reset between the active-selector write and pending-record removal.
 Factory provisioning
 therefore leaves no partial identity when Wi-Fi, HTTPS, validation, or storage
 fails. Existing devices can enter setup mode by holding the configured button for
-three seconds; submitting a blank claim code changes Wi-Fi atomically while
-retaining the prior working identity until the new network connects. Calling
-`factoryReset()` explicitly removes both slots and re-enters setup.
+three seconds; submitting a blank claim code changes Wi-Fi, keeping the prior
+identity, once the new network connects and the clock is valid. The identity
+itself is then checked by the device's own MQTT session (a separate probe with
+the same client ID would displace it). Calling `factoryReset()` explicitly
+removes both slots and re-enters setup.
+
+A commissioned unit that loses its saved WLAN for 20 seconds (at startup or
+later), or cannot get a valid clock, opens the setup access point for a Wi-Fi
+change and keeps the station running (AP+STA): the saved WLAN is retried after
+30 s, then with doubling waits up to 5 minutes (`wifiRetryBaseMs`,
+`wifiRetryMaximumMs`). Once it connects, the portal closes and the unit
+continues as at startup. Without a setup code the retries run without the
+access point. The setup button opens the portal without these retries.
 
 Committing a newly claimed identity also prepares its protocol state: a fresh
 command journal (`highWater` 0) for the new device ID and, if missing, the boot
-counter. Wi-Fi changes, credential resets and `factoryReset()` keep the setup
-code, the OTA floor, the journal and the boot counter (section 15 of the spec).
+counter. The pending claim is kept until both the credentials and that state
+are durable and read back, and an interrupted commit is finished at boot.
+Wi-Fi changes, credential resets and `factoryReset()` keep the setup code, the
+OTA floor, the journal and the boot counter (section 15 of the spec).
+
+Only a claim (a new device identity) or a first enrollment may initialize the
+journal and the boot counter. Manually supplied credentials (`nivalo.cli.provision.v1`,
+a compiled developer fixture) for the device ID the journal belongs to keep its
+high-water mark and boot counter; on a unit without any protocol state or
+identity they start a first enrollment; anything else (a missing or unreadable
+journal or boot counter for an existing identity, or another device ID's
+history) is refused before anything changes, so the device stays blocked
+rather than replaying an operation. Claim such a unit instead.
 
 ### Setup access point and setup code
 
@@ -151,17 +180,37 @@ no reset clears:
 ```
 
 The response is `{"schema":"nivalo.cli.setup-code.v1","requestId":"...","ok":true}`;
-the code is never echoed. Sending a new code rotates it.
+the code is never echoed. Sending a new code rotates it: a running access point
+is stopped (its stations are disconnected) and reopened with the new code before
+the response is sent, so the old passphrase stops working at once. When the
+access point cannot start, AP mode is switched off rather than left in an
+earlier configuration.
 
 **Limitation:** the portal itself stays on the Arduino stack and serves plain
 HTTP on the isolated setup network. WPA2 with the setup code is the protection;
 anyone who holds the code is inside the setup trust boundary. Secure boot, flash
 and NVS encryption and a stronger provisioning channel are later ESP-IDF work.
 
-Production storage requires ESP32 flash/NVS encryption. Startup fails closed when
-flash encryption is absent. Local boards may opt in with
-`allowUnencryptedNvsForLocalDevelopment`; the examples keep this off. Likewise,
-compiled developer fixtures exist only inside
+### Credential storage
+
+The Wi-Fi password, the MQTT credentials, the claim proof private key, the
+pending claim and the setup code are stored with Preferences (NVS).
+`NivaloProvisioning` uses it only where NVS encryption is actually active (NVS
+encryption with an `nvs_keys` partition under flash encryption; the flash
+encryption eFuse alone does not count), unless `allowPlaintextNvs` is set.
+`storageProtected()` reports which one is in use.
+
+**The owner's boards use plain NVS.** They are stock original ESP32 Feathers
+without flash encryption, and the Arduino-ESP32 2.0.17 prebuilt SDK cannot
+encrypt NVS at all, so the `Esp32Only` staging and production environments
+build with `NIVALO_ALLOW_PLAINTEXT_NVS=1`. Anyone with physical access to a unit
+can read the Wi-Fi password, the MQTT credentials and the claim proof key from
+its flash. Recovery from a lost or tampered unit: revoke (retire) the device in
+the platform, which disables its credential, and re-claim the hardware, which
+issues a new identity; change the Wi-Fi password if it may have been read. Flash
+and NVS encryption come with the later ESP-IDF re-platform.
+
+Compiled developer fixtures exist only inside
 `NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE`, which defaults to `0`.
 
 ### CLI serial provisioning
@@ -186,7 +235,9 @@ output:
   TLS identity matching `tests/cli_provision_request_v1.json`, writes a
   durable recovery stage, commits to the inactive Preferences slot, verifies
   both the slot and active selector, replaces any older claim with a verified
-  non-secret tombstone, clears the stage, and only then acknowledges and restarts;
+  non-secret tombstone, makes the protocol state durable (see the identity rules
+  above; a request those rules refuse changes nothing), clears the stage, and
+  only then acknowledges and restarts;
 - input is NDJSON bounded to 16 KiB, 256 bytes of work per loop, and a five-second
   frame lifetime; partial, malformed, oversized, extra-field, and unsupported
   requests fail closed;
@@ -194,7 +245,7 @@ output:
   bounded identities, and an open or valid WPA passphrase. The request and all
   credential values are wiped from the line buffer and never echoed or logged.
 
-After a successful claim, encrypted NVS retains only the code's SHA-256 receipt
+After a successful claim, NVS retains only the code's SHA-256 receipt
 with the active identity. If USB is lost after the commit but before the
 terminal response, repeating the same serial request returns the committed
 device ID without another HTTPS exchange. A different code cannot replace an
@@ -202,8 +253,8 @@ active identity through this factory serial path; use the explicit reset or
 audited transfer workflow. The receipt is a local recovery discriminator, not
 an authentication credential: it is never returned or logged, is accepted only
 over the physical serial boundary for the exact hardware ID, and is never
-stored when encrypted NVS is unavailable outside the explicit development
-exception. A later Wi-Fi change or direct credential replacement invalidates
+stored when NVS is unavailable to provisioning (no NVS encryption and no
+`allowPlaintextNvs`). A later Wi-Fi change or direct credential replacement invalidates
 the receipt.
 
 Boot recovery completes a durable CLI stage before it considers a prior captive-
@@ -212,8 +263,8 @@ leaves a retryable stage and cannot acknowledge an identity that the next boot
 would silently replace.
 
 Serial identification remains available when storage is unavailable, but serial
-provisioning is rejected unless flash/NVS encryption is active or the existing
-explicit local-development exception is enabled. A compiled local developer
+provisioning is rejected unless NVS encryption is active or `allowPlaintextNvs`
+is set. A compiled local developer
 fixture also disables serial provisioning because it would otherwise mask the
 committed identity after restart. Set `enableCliSerial` to `false` for products
 that do not expose this physical provisioning surface.
@@ -291,13 +342,22 @@ otherwise the device disconnects and retries. Then it publishes the retained
 capability catalog and repeats the last terminal ACK. While connected it sends
 a non-retained `heartbeat` every 600 ± 30 s with uptime, heap, RSSI and dropped
 telemetry batches. `device.shutdown()` publishes the retained `end`/`shutdown`
-and disconnects. Heartbeats are free; a device needs no runtime telemetry for
-health.
+and then sends DISCONNECT; if that end message could not be published it closes
+the connection without DISCONNECT, so the broker publishes the Will instead.
+Heartbeats are free; a device needs no runtime telemetry for health. The Will
+is built in the device's own buffer, and the MQTT packet buffer (4 KiB) and
+every copied setting are checked before the boot counter advances, so a start
+that runs out of memory changes nothing and can be retried (the example retries
+every 30 s).
 
-Connection management is non-blocking: failed attempts use exponential backoff
-from 1 to 60 seconds plus up to 25% random jitter. The loop registers/resets the
-ESP task watchdog by default (30 seconds, configurable through
-`NivaloDeviceConfig`).
+Connection management is non-blocking between attempts: failed attempts use
+exponential backoff from 1 to 60 seconds plus up to 25% random jitter. One
+attempt blocks the loop, bounded by a 5 s TCP connect, a 10 s TLS handshake and
+a 5 s MQTT socket timeout, plus up to 15 s of DNS that the Arduino core does not
+let us shorten; an OTA request adds an 8 s response timeout. The loop
+registers/resets the ESP task watchdog by default (60 seconds, at least 50,
+configurable through `NivaloDeviceConfig`) and feeds it before each blocking
+write; a `begin()` that fails unsubscribes the task again.
 
 ## Telemetry, events and state
 
@@ -316,7 +376,11 @@ device.flushTelemetry();                     // publishes the batch
 A full batch is published automatically. `publishVariables()` publishes every
 registered variable as one sample, `publishTelemetry(name, value, unit)` one
 reading at once, and `publishRuntimeTelemetry()` `uptime_s`, `wifi_rssi` and
-heap figures as one sample. Values are exact decimals with at most six
+heap figures as one sample. An invalid reading (bad name, unit or value, or a
+name already in the sample, case twins included) is refused and leaves the
+pending sample unchanged; only a full batch is published to make room. A
+telemetry message that cannot be copied into the offline buffer counts as
+dropped. Values are exact decimals with at most six
 fractional digits within ±4294967295.999999; names, units and raw text follow
 the protocol's limits and are refused otherwise. Publish methods return 1 only
 for an actual MQTT publish.
@@ -360,16 +424,29 @@ device.function("setLed", setLed, metadata);
 device.variable("ledState", &ledState);
 ```
 
-The validator runs before the operation is claimed (`false` rejects it as
-`invalid_command`); arguments never contain `null`. The handler is called at
-most once and returns:
+The arguments are the exact bytes received, parsed once into the object that
+the validator and then the handler see; nothing is re-serialized in between, so
+a value such as `0.9999999999` reaches the handler as sent. A number that object
+cannot represent (non-finite, an integer outside 64 bits, a nonzero value that
+underflows to zero) is refused as `invalid_command` before the claim, like
+`null`. The validator runs before the operation is claimed (`false` rejects it
+as `invalid_command`). The handler and its arguments are prepared before the
+claim, so the final clock and deadline reading is immediately followed by the
+handler call. The handler is called at most once and returns:
 
 | Outcome | ACK |
 |---|---|
 | `NIVALO_FUNCTION_SUCCEEDED` | `succeeded` |
 | `NIVALO_FUNCTION_FAILED` (the effect certainly did not happen) | `failed` / `handler_failed` |
 | `NIVALO_FUNCTION_UNKNOWN` (the effect may have happened, e.g. a timeout after an output changed) | `indeterminate` / `execution_unknown` |
-| `NIVALO_FUNCTION_PENDING` (still running; call `device.completeFunction(outcome)` later) | `running` to duplicates until then |
+| `NIVALO_FUNCTION_PENDING` (still running; report the outcome later with `device.completeFunction(token, outcome)`) | `running` to duplicates until then |
+
+A handler that returns `NIVALO_FUNCTION_PENDING` reads its invocation token with
+`device.functionToken()` while it runs. `completeFunction(token, outcome)` may
+be called from any task: it only queues the outcome, and `device.loop()`
+journals it on the executor; the device stays busy until that terminal result
+is durable. A stale or unknown token (an earlier invocation, a duplicate
+completion) is refused and changes nothing.
 
 Handlers run from `device.loop()` and must not call it. `requestDefinitions` is
 built in. Reserved names (`flash`, `requestDefinitions`, `firmware.*`, `ota.*`
@@ -381,10 +458,18 @@ and 12 variables; supported variable types are signed and unsigned `int`/`long`,
 library compares the registered definitions with the catalog it reported last
 (revision, digest and names are kept in NVS): an unchanged catalog keeps its
 revision, any changed definition, rename or removal advances it and is stored
-before it is published. Removed names are kept as tombstones and re-sent as
-removes; a case-only rename always travels as its remove and upsert pair. After
-every birth and on `requestDefinitions` the whole catalog is published in
-packets of at most 8 operations. Registrations after that are refused.
+before it is published. Removed names are kept as tombstones (at most 16) and
+re-sent as removes; a case-only rename always travels as its remove and upsert
+pair. A change that cannot be represented, more than 16 retired names or a
+live name with two retired case twins (renaming one name twice by case only),
+is refused: nothing is stored or published, the stored history stays, and the
+device logs it. A stored catalog that cannot be read is never treated as a
+first enrollment or written over; the refresh is retried while connected, as is
+any refresh that did not complete. After every birth and on
+`requestDefinitions` the whole catalog is published in packets of at most 8
+operations; `requestDefinitions` succeeds only when every packet was
+published (`failed`/`handler_failed` when none was, `indeterminate` when some
+were). Registrations after that are refused.
 
 ## Command execution
 
@@ -409,7 +494,8 @@ before the effect. A `claimed` generic record found at boot becomes
 `indeterminate` / `execution_unknown`. The last terminal ACK is repeated after
 every birth and with every heartbeat from RAM (no NVS write per heartbeat). If
 the journal is missing, corrupt or cannot be written, the device accepts no
-downlinks until it is re-claimed (`device.needsReclaim()`).
+downlinks until it is re-claimed (`device.needsReclaim()`). Envelope `firmware`
+metadata on an operation route is `invalid_command` (firmware placement).
 
 ## Firmware updates (OTA)
 
@@ -425,7 +511,11 @@ port).
 The image then streams over certificate-validating HTTPS without redirects
 straight into the inactive slot; exactly `sizeBytes` bytes (an exact
 Content-Length is required), the SHA-256 and the embedded product ID and
-security version must match, and `esp_ota_end()` validates it. A pending record
+security version must match, and `esp_ota_end()` validates it. The image must
+contain the descriptor magic exactly once at any byte offset, overlapping
+occurrences included. The download starts only while the clock is valid and the
+deadline allows it, and stops as soon as a fresh reading shows the job can no
+longer be activated (`expired` or `clock_unsynced`). A pending record
 (sequence, product, version, size, digest) is written and read back, the clock
 and deadline are re-checked on a reading taken after that write, and only then
 is `esp_ota_set_boot_partition()` called, exactly once. A definite refusal is a
@@ -433,10 +523,22 @@ zero-effect `ota_rejected`; an uncertain failure keeps the claim and reboots.
 At boot, before connecting, a claimed OTA record with a matching pending record
 is reconciled by hashing exactly `sizeBytes` bytes of the running slot: on a
 match the floor is committed, then `succeeded` is journaled, then the pending
-record is cleared; otherwise `indeterminate` / `execution_unknown`.
+record is cleared; otherwise `indeterminate` / `execution_unknown`. The pending
+record is only ever cleared after the terminal result is durable. A committed
+floor record that cannot be read disables OTA (every job is `ota_rejected`) and
+is left in place for recovery; it is never taken as "no floor".
 
 Populate `firmwareSigningKeys` with ECDSA P-256 SubjectPublicKeyInfo PEM values
-selected by exact `keyId`; an empty trust set rejects every OTA job. Provision
+selected by exact `keyId`; an empty trust set rejects every OTA job. The
+`Esp32Only` example carries the release public key of each environment in the
+tracked `include/nivalo_firmware_trust.h` (production `nivalo-prod-2026-11`,
+staging `staging-d364850176bd64cd`), selected by `NIVALO_ENVIRONMENT_STAGING` or
+`NIVALO_ENVIRONMENT_PRODUCTION` in `platformio.ini`. A staging or production
+build without its key, with a key defined anywhere else, or with a `test-` key
+ID fails to compile. The public key is the SubjectPublicKeyInfo of
+`Nivalo.<IoT|Staging>.Firmware.ArtifactSigning.CurrentPrivateKeyPkcs8Base64`,
+derived in memory (as `nivalo-platform/infrastructure/nivalo-vm/Write-NivaloEnvFiles.ps1`
+does for the console). Provision
 only public keys on devices. For rotation, first deploy firmware that trusts
 both the new current key and the immediately previous key, begin signing
 artifacts with the new key after that firmware is established, and remove the
@@ -492,7 +594,15 @@ tests replay `nivalo-protocol`'s `fixtures/v1.1` against them:
   across releases (unchanged, changed, removed, renamed);
 - `nivalo_v11_uplink_tests` and `nivalo_v11_uplink_reference_model`: every
   uplink the builders produce is replayed through the protocol's reference
-  model (`tests/protocol_v1_1.py`) by `tests/validate_v11_uplinks.py`.
+  model (`tests/protocol_v1_1.py`) by `tests/validate_v11_uplinks.py`;
+- `nivalo_v11_store_tests`: the real `NivaloDeviceStore` on a map-backed
+  stand-in for Preferences (`tests/host/fakes`): what a credential change may
+  do to the journal and the boot counter, and unreadable floor and catalog
+  records.
+
+The execution tests also cover asynchronous completion tokens, argument
+preparation, the order of the final clock reading and the handler call, and
+pending-record cleanup after a failed or interrupted terminal write.
 
 The presence, command-dispatch and ingest-metering vectors describe the server
 and are not replayed here.
@@ -510,9 +620,9 @@ Python with `jsonschema==4.25.1` and `rfc3339-validator==0.1.4`.
 CI is one Linux job for pull requests and pushes to `main`: the host CTest
 suite against the pinned protocol commit (`NIVALO_PROTOCOL_REF`), the claim and
 DAP provenance checks, the Python tooling tests, Arduino Lint (specification),
-and cached PlatformIO builds of the standalone and bridge examples
-(`featheresp32` environment of each). The browser-provisioning, production,
-NodeMCU and Arduino-sketch builds, the factory-image inspection and the
+and cached PlatformIO builds of the standalone example (`featheresp32` staging
+and `featheresp32-production`, each with its trust anchor) and of the bridge
+(`featheresp32`). The browser-provisioning, NodeMCU and Arduino-sketch builds, the factory-image inspection and the
 clean-cache registry archive builds run in the `Registry release` workflow (see
 `docs/registry-release.md`).
 

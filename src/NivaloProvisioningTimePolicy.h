@@ -3,14 +3,11 @@
 
 #include <stdint.h>
 
+// Wrap-safe timing for provisioning's bounded retries. Whether the clock permits TLS is decided by
+// the shared device clock (NivaloSystemClock.h), not here.
 class NivaloProvisioningTimePolicy
 {
 public:
-    static bool permitsTls(int64_t epochSeconds, uint64_t minimumValidEpochSeconds)
-    {
-        return epochSeconds >= 0 && static_cast<uint64_t>(epochSeconds) >= minimumValidEpochSeconds;
-    }
-
     static bool elapsed(uint32_t now, uint32_t startedAt, uint32_t intervalMs)
     {
         return static_cast<uint32_t>(now - startedAt) >= intervalMs;

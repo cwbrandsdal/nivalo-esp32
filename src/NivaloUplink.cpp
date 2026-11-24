@@ -354,28 +354,37 @@ void NivaloTelemetryBatch::dropEmptySample()
     _buffer[_length] = '\0';
 }
 
-bool NivaloTelemetryBatch::addValue(const char *name, double value, const char *unit)
+bool NivaloTelemetryBatch::addValue(const char *name, double value, const char *unit, bool *full)
 {
+    if (full != NULL)
+    {
+        *full = false;
+    }
     char text[32];
     if (!nivaloFormatDecimal(value, text, sizeof(text)))
     {
         return false;
     }
-    return addMetric(name, text, NULL, unit);
+    return addMetric(name, text, NULL, unit, full);
 }
 
-bool NivaloTelemetryBatch::addRaw(const char *name, const char *raw, const char *unit)
+bool NivaloTelemetryBatch::addRaw(const char *name, const char *raw, const char *unit, bool *full)
 {
+    if (full != NULL)
+    {
+        *full = false;
+    }
     if (raw == NULL || strlen(raw) > NivaloV11::MaxRawBytes || !nivaloIsUtf8(raw, strlen(raw)))
     {
         return false;
     }
-    return addMetric(name, NULL, raw, unit);
+    return addMetric(name, NULL, raw, unit, full);
 }
 
-bool NivaloTelemetryBatch::addMetric(const char *name, const char *valueText, const char *raw, const char *unit)
+bool NivaloTelemetryBatch::addMetric(const char *name, const char *valueText, const char *raw, const char *unit,
+                                     bool *full)
 {
-    if (_closed || _samples == 0U || _readings >= NivaloV11::MaxReadings || !nivaloIsName(name) ||
+    if (_closed || _samples == 0U || !nivaloIsName(name) ||
         (unit != NULL && !nivaloIsText(unit, NivaloV11::MaxUnitBytes)))
     {
         return false;
@@ -390,8 +399,12 @@ bool NivaloTelemetryBatch::addMetric(const char *name, const char *valueText, co
     // Written in place after the current content, leaving room for the closing "]}]}".
     const size_t start = _length;
     const size_t offset = start + (_sampleMetrics > 0U ? 1U : 0U);
-    if (offset + 4U >= PayloadCapacity)
+    if (_readings >= NivaloV11::MaxReadings || offset + 4U >= PayloadCapacity)
     {
+        if (full != NULL)
+        {
+            *full = true;
+        }
         return false;
     }
     NivaloJsonWriter writer(_buffer + offset, PayloadCapacity - 4U - offset + 1U);
@@ -416,7 +429,12 @@ bool NivaloTelemetryBatch::addMetric(const char *name, const char *valueText, co
     writer.endObject();
     if (writer.failed())
     {
+        // Name, unit and value are valid, so only the remaining bytes ran out.
         _buffer[start] = '\0';
+        if (full != NULL)
+        {
+            *full = true;
+        }
         return false;
     }
     if (_sampleMetrics > 0U)

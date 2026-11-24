@@ -265,7 +265,9 @@ NivaloJsonRule nivaloScanJson(const char *data, size_t length, unsigned maxDepth
 {
     NivaloJsonScan local;
     NivaloJsonScan &scan = result != NULL ? *result : local;
+    const char *captureMember = scan.captureMember;
     scan = NivaloJsonScan();
+    scan.captureMember = captureMember;
     if (data == NULL || length > 65535U || maxValues > NivaloJsonMaxValues || maxDepth > NivaloJsonMaxDepth)
     {
         scan.rule = NIVALO_JSON_SYNTAX;
@@ -401,7 +403,7 @@ member:
     }
     scanner.advance();
     scanner.skipWhitespace();
-    if (depth == 1U && spanEquals(data, key, "payload"))
+    if (depth == 1U && scan.captureMember != NULL && spanEquals(data, key, scan.captureMember))
     {
         scan.hasPayload = true;
         scan.payloadOffset = scanner.position();

@@ -74,14 +74,15 @@ public:
     // after the previous sample: publish the batch first.
     bool beginSample(int64_t atMs);
     // Adds one metric to the open sample. False (and the batch unchanged) for an invalid name,
-    // unit or value, a duplicate or case-twin name in the sample, or a full batch.
-    bool addValue(const char *name, double value, const char *unit);
-    bool addRaw(const char *name, const char *raw, const char *unit);
+    // unit or value, a duplicate or case-twin name in the sample, or a full batch; *full (when
+    // given) tells the last case apart, the only one a fresh batch can cure.
+    bool addValue(const char *name, double value, const char *unit, bool *full = NULL);
+    bool addRaw(const char *name, const char *raw, const char *unit, bool *full = NULL);
     // {"samples":[...]}; NULL when empty.
     const char *payload(size_t *length);
 
 private:
-    bool addMetric(const char *name, const char *valueText, const char *raw, const char *unit);
+    bool addMetric(const char *name, const char *valueText, const char *raw, const char *unit, bool *full);
     void dropEmptySample();
     char _buffer[PayloadCapacity + 1U];
     size_t _length = 0U;

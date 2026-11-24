@@ -10,6 +10,7 @@
 #include <ArduinoJson.h>
 #include <esp_partition.h>
 
+#include "NivaloArguments.h"
 #include "NivaloCatalog.h"
 #include "NivaloClock.h"
 #include "NivaloConnection.h"
@@ -22,6 +23,7 @@
 #include "NivaloOtaPolicy.h"
 #include "NivaloSdkRegistry.h"
 #include "NivaloStatusPixel.h"
+#include "NivaloSystemClock.h"
 #include "NivaloUplink.h"
 #include "NivaloWire.h"
 
@@ -102,8 +104,13 @@ struct NivaloDeviceConfig
     HardwareSerial *secondarySerial = NULL;
     unsigned long secondaryBaud = 115200;
     bool watchdogEnabled = true;
-    uint16_t watchdogTimeoutSeconds = 30;
+    // At least NIVALO_MIN_WATCHDOG_SECONDS: one MQTT connect or OTA request blocks the loop for
+    // up to about 45 s (DNS 15 s, TCP 5 s, TLS handshake 10 s, MQTT/HTTP response 5-8 s, request
+    // write 5 s), and the loop cannot feed the watchdog inside it.
+    uint16_t watchdogTimeoutSeconds = 60;
 };
+
+#define NIVALO_MIN_WATCHDOG_SECONDS 50
 
 class NivaloDevice
 {
@@ -151,8 +158,12 @@ public:
     bool variable(const char *name, double *reference, const char *unit = NULL);
     bool variable(const char *name, bool *reference, const char *unit = NULL);
     bool variable(const char *name, String *reference, const char *unit = NULL);
-    // Ends a handler that returned NIVALO_FUNCTION_PENDING.
-    void completeFunction(NivaloFunctionOutcome outcome);
+    // A handler that will return NIVALO_FUNCTION_PENDING reads its invocation token while it runs
+    // (0 outside a handler call) and later reports the outcome with it, from any task:
+    // completeFunction() only queues it; device.loop() journals it on the executor. Returns false
+    // for a stale or unknown token or when a completion for it is already queued.
+    uint32_t functionToken() const;
+    bool completeFunction(uint32_t token, NivaloFunctionOutcome outcome);
 
     // --- Session --------------------------------------------------------------------------------
     // Publishes the retained graceful end and disconnects.
@@ -176,10 +187,11 @@ private:
         NivaloClockReading readClock() override;
         void publishAck(const NivaloAck &ack) override;
         bool hasFunction(const char *name) override;
-        bool validArguments(const char *name, const char *argumentsJson) override;
-        NivaloFunctionOutcome invokeFunction(const char *name, const char *argumentsJson) override;
-        void refreshCatalog() override;
-        NivaloDownloadOutcome downloadImage(const NivaloOperation &operation) override;
+        bool prepareFunction(const NivaloOperation &operation) override;
+        NivaloFunctionOutcome invokePrepared(uint32_t token) override;
+        void releasePrepared() override;
+        NivaloRefreshOutcome refreshCatalog() override;
+        NivaloDownloadOutcome downloadImage(const NivaloOperation &operation, uint32_t token) override;
         NivaloActivationOutcome activateImage() override;
         bool hashRunningSlot(uint32_t sizeBytes, char sha256Hex[65]) override;
         void restart() override;
@@ -189,7 +201,11 @@ private:
     };
     friend class Platform;
 
-    static bool buildWill(void *context, String &will);
+    static const char *buildWill(void *context);
+    static void onTrustedSync(void *context, int64_t utcMs, int64_t monotonicUs);
+    void feedWatchdog();
+    void serviceCompletion();
+    void serviceCatalogRetry();
     void mqttCallback(char *topic, byte *message, unsigned int length);
     void serviceConnection();
     void onConnected();
@@ -201,17 +217,17 @@ private:
     bool nextMessageId(char output[37]);
     bool publishEnvelope(const char *topic, const char *payload, size_t length, const char *correlationId,
                          const NivaloFirmwareInfo *firmware, bool retained);
-    bool publishAckNow(const NivaloAck &ack);
-    void queueAck(const NivaloAck &ack);
+    // Builds (when bytes is empty) and publishes an ACK; the envelope stays in bytes for a retry.
+    bool publishAck(const NivaloAck &ack, char *bytes, size_t capacity, uint16_t *length);
+    void queueAck(const NivaloAck &ack, const char *bytes, uint16_t length);
     void drainAcks();
     bool publishBatch();
     void bufferTelemetry(const char *envelope, size_t length);
     void flushTelemetryBuffer();
     bool openSample();
     bool sealCatalog();
-    void publishCatalog();
+    NivaloRefreshOutcome publishCatalog();
     NivaloDownloadOutcome downloadFirmware(const NivaloOperation &operation);
-    bool parseArguments(const char *argumentsJson, DynamicJsonDocument &document);
     bool advanceConnection();
 
     // UART bridge input (secondary MCU over UART).
@@ -234,14 +250,32 @@ private:
     NivaloFirmwareInfo _firmware;
 
     NivaloTopics _topics;
-    NivaloClock _clock;
+    // The process-wide clock (NivaloSystemClock.h), shared with provisioning.
+    NivaloClock &_clock;
     NivaloDeviceStore _store;
     Platform _platform;
     NivaloExecutor _executor;
     NivaloOtaDevice _ota;
     NivaloSdkRegistry _sdkRegistry;
     NivaloCatalogState _catalog;
+    // How the stored catalog read: MISSING is a first enrollment; CORRUPT (unreadable) is never
+    // written over and blocks the refresh until a later read succeeds.
+    NivaloStoreRead _catalogRead = NIVALO_STORE_CORRUPT;
     bool _catalogReady = false;
+    // A refresh that did not complete is retried while connected; a catalog this firmware cannot
+    // report (refused transition, too many entries) is not.
+    bool _catalogRefreshPending = false;
+    bool _catalogUnreportable = false;
+    int64_t _catalogRetryAtUs = 0;
+
+    // The generic command being executed: its handler and the arguments it receives, prepared
+    // before the claim.
+    NivaloPreparedArguments _prepared;
+    const NivaloRegisteredFunction *_preparedFunction = NULL;
+    // The asynchronous completion mailbox (written by any task, drained by loop()).
+    volatile uint32_t _completionToken = 0U;
+    volatile bool _completionQueued = false;
+    volatile NivaloFunctionOutcome _completionOutcome = NIVALO_FUNCTION_UNKNOWN;
     NivaloConnection _connection;
     NivaloLinkManager _link;
     NivaloOtaManager _otaPins;
@@ -261,9 +295,18 @@ private:
     bool _inboxFull = false;
     bool _executorBusyLoop = false;
 
-    // ACKs waiting for a connection and a valid clock.
+    // ACKs waiting for a connection and a valid clock. An ACK whose publish was attempted keeps its
+    // envelope, so a retry sends identical bytes (section 3); a deferred one is built when the
+    // clock is valid.
     static constexpr size_t AckQueueCapacity = 6U;
-    NivaloAck _ackQueue[AckQueueCapacity];
+    static constexpr size_t AckEnvelopeCapacity = 384U;
+    struct QueuedAck
+    {
+        NivaloAck ack;
+        uint16_t length = 0U;
+        char bytes[AckEnvelopeCapacity] = {0};
+    };
+    QueuedAck _ackQueue[AckQueueCapacity];
     size_t _ackQueueCount = 0U;
 
     NivaloTelemetryBatch _batch;

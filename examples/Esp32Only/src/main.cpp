@@ -23,6 +23,33 @@
 #error "Browser provisioning artifacts cannot contain a local developer fixture."
 #endif
 
+#include "nivalo_firmware_trust.h"
+
+#ifndef NIVALO_ALLOW_PLAINTEXT_NVS
+#define NIVALO_ALLOW_PLAINTEXT_NVS 0
+#endif
+
+// A staging or production image always carries its release trust anchor; a reserved test key
+// (specs/cloud-mqtt-v1.1.md section 11.2) never builds into one.
+#if (defined(NIVALO_ENVIRONMENT_STAGING) || defined(NIVALO_ENVIRONMENT_PRODUCTION)) && \
+    (!defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) || !defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM))
+#error "This staging/production environment has no firmware trust anchor in nivalo_firmware_trust.h"
+#endif
+#if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) || defined(NIVALO_FIRMWARE_PREVIOUS_KEY_ID)
+static constexpr bool nivaloTestKeyId(const char *keyId)
+{
+    return keyId[0] == 't' && keyId[1] == 'e' && keyId[2] == 's' && keyId[3] == 't' && keyId[4] == '-';
+}
+#endif
+#ifdef NIVALO_FIRMWARE_CURRENT_KEY_ID
+static_assert(sizeof(NIVALO_FIRMWARE_CURRENT_KEY_ID) > 1U && !nivaloTestKeyId(NIVALO_FIRMWARE_CURRENT_KEY_ID),
+              "release firmware key IDs never start with test-");
+#endif
+#ifdef NIVALO_FIRMWARE_PREVIOUS_KEY_ID
+static_assert(sizeof(NIVALO_FIRMWARE_PREVIOUS_KEY_ID) > 1U && !nivaloTestKeyId(NIVALO_FIRMWARE_PREVIOUS_KEY_ID),
+              "release firmware key IDs never start with test-");
+#endif
+
 // The environment (staging or production) is chosen by the PlatformIO environment, which sets
 // NIVALO_PRODUCT_ID, NIVALO_SECURITY_VERSION and NIVALO_API_ORIGIN (see platformio.ini).
 #ifndef NIVALO_API_ORIGIN
@@ -40,6 +67,10 @@ static const NivaloFirmwareSigningKey firmwareSigningKeys[] = {
 };
 #endif
 unsigned long lastTelemetryAt = 0;
+// A start that failed (for example a temporary allocation failure) is retried after this delay;
+// it changes no durable state.
+static const unsigned long DeviceStartRetryMs = 30000UL;
+unsigned long deviceStartAttemptAt = 0;
 bool deviceStartAttempted = false;
 bool deviceStarted = false;
 bool ledState = false;
@@ -86,9 +117,10 @@ void setup()
     // A normally erased evaluation board has flash/NVS encryption disabled.
     // This explicit build is test-only; production artifacts must replace it
     // with a reviewed encrypted-board enablement path.
-    provision.allowUnencryptedNvsForLocalDevelopment = true;
+    provision.allowPlaintextNvs = true;
 #else
-    provision.allowUnencryptedNvsForLocalDevelopment = NIVALO_ALLOW_UNENCRYPTED_NVS_FOR_LOCAL_DEVELOPMENT != 0;
+    // Plain NVS on the owner's unencrypted boards (platformio.ini; README "Credential storage").
+    provision.allowPlaintextNvs = NIVALO_ALLOW_PLAINTEXT_NVS != 0;
 #endif
 #if NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE
     static const NivaloRuntimeCredentials fixture = {NIVALO_DEV_WIFI_SSID, NIVALO_DEV_WIFI_PASSWORD, NIVALO_DEV_DEVICE_ID,
@@ -101,8 +133,10 @@ void setup()
 void loop()
 {
     provisioning.loop();
-    if (provisioning.ready() && !deviceStartAttempted) {
+    if (provisioning.ready() && !deviceStarted &&
+        (!deviceStartAttempted || millis() - deviceStartAttemptAt >= DeviceStartRetryMs)) {
         deviceStartAttempted = true;
+        deviceStartAttemptAt = millis();
         const NivaloRuntimeCredentials &r = provisioning.credentials();
         NivaloDeviceConfig c;
         c.mqtt.deviceId = r.deviceId.c_str(); c.mqtt.clientId = r.mqttClientId.c_str(); c.mqtt.username = r.mqttUsername.c_str();
@@ -115,10 +149,12 @@ void loop()
         c.mqtt.firmwareSigningKeys = firmwareSigningKeys;
         c.mqtt.firmwareSigningKeyCount = sizeof(firmwareSigningKeys) / sizeof(firmwareSigningKeys[0]);
 #endif
+        // On failure begin() unsubscribes this task from the watchdog again, so the wait below
+        // cannot reset the board.
         deviceStarted = device.begin(c);
         if (!deviceStarted)
         {
-            Serial.println("Nivalo device could not start");
+            Serial.println("Nivalo device could not start; retrying in 30 s");
         }
     }
     if (!deviceStarted) { delay(2); return; }

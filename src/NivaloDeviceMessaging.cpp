@@ -38,27 +38,49 @@ bool NivaloDevice::publishEnvelope(const char *topic, const char *payload, size_
     nextMessageId(messageId);
     const size_t envelope = nivaloBuildEnvelope(_deviceId.c_str(), messageId, _clock.read(monotonicUs()).utcMs,
                                                 correlationId, firmware, payload, length, _envelope, sizeof(_envelope));
+    // Each write can block up to the socket timeout; the loop's watchdog is fed before each one.
+    feedWatchdog();
     return envelope > 0U && _connection.publish(topic, _envelope, retained);
 }
 
 // --- ACKs ----------------------------------------------------------------------------------------
 
-bool NivaloDevice::publishAckNow(const NivaloAck &ack)
+bool NivaloDevice::publishAck(const NivaloAck &ack, char *bytes, size_t capacity, uint16_t *length)
 {
     char topic[128];
-    char payload[160];
-    const size_t length = nivaloAckPayload(ack.seq, ack.result, NULL, -1, payload, sizeof(payload));
-    return length > 0U && _topics.ack(ack.operationClass, ack.id, topic, sizeof(topic)) &&
-           publishEnvelope(topic, payload, length, ack.id, NULL, false);
+    if (!_connection.connected() || !clockValid() || !_topics.ack(ack.operationClass, ack.id, topic, sizeof(topic)))
+    {
+        return false;
+    }
+    if (*length == 0U)
+    {
+        // First attempt: build the envelope once; a retry resends exactly these bytes.
+        char payload[160];
+        char messageId[37];
+        const size_t payloadLength = nivaloAckPayload(ack.seq, ack.result, NULL, -1, payload, sizeof(payload));
+        nextMessageId(messageId);
+        const size_t envelope =
+            payloadLength == 0U ? 0U
+                                : nivaloBuildEnvelope(_deviceId.c_str(), messageId, _clock.read(monotonicUs()).utcMs,
+                                                      ack.id, NULL, payload, payloadLength, bytes, capacity);
+        if (envelope == 0U)
+        {
+            return false;
+        }
+        *length = (uint16_t)envelope;
+    }
+    feedWatchdog();
+    return _connection.publish(topic, bytes, false);
 }
 
-void NivaloDevice::queueAck(const NivaloAck &ack)
+void NivaloDevice::queueAck(const NivaloAck &ack, const char *bytes, uint16_t length)
 {
     for (size_t i = 0U; i < _ackQueueCount; i++)
     {
-        if (_ackQueue[i].seq == ack.seq && _ackQueue[i].operationClass == ack.operationClass &&
-            _ackQueue[i].result.status == ack.result.status && _ackQueue[i].result.code == ack.result.code &&
-            strcmp(_ackQueue[i].id, ack.id) == 0)
+        const NivaloAck &queued = _ackQueue[i].ack;
+        if (queued.seq == ack.seq && queued.operationClass == ack.operationClass &&
+            queued.result.status == ack.result.status && queued.result.code == ack.result.code &&
+            strcmp(queued.id, ack.id) == 0)
         {
             return;
         }
@@ -66,21 +88,35 @@ void NivaloDevice::queueAck(const NivaloAck &ack)
     if (_ackQueueCount == AckQueueCapacity)
     {
         // A dropped terminal ACK is repeated from the journal with the next birth or heartbeat.
-        memmove(&_ackQueue[0], &_ackQueue[1], sizeof(NivaloAck) * (AckQueueCapacity - 1U));
+        for (size_t i = 1U; i < AckQueueCapacity; i++)
+        {
+            _ackQueue[i - 1U] = _ackQueue[i];
+        }
         _ackQueueCount--;
     }
-    _ackQueue[_ackQueueCount++] = ack;
+    QueuedAck &entry = _ackQueue[_ackQueueCount++];
+    entry.ack = ack;
+    entry.length = length < sizeof(entry.bytes) ? length : 0U;
+    if (entry.length > 0U)
+    {
+        memcpy(entry.bytes, bytes, entry.length);
+        entry.bytes[entry.length] = '\0';
+    }
 }
 
 void NivaloDevice::drainAcks()
 {
     while (_ackQueueCount > 0U && _connection.connected() && clockValid())
     {
-        if (!publishAckNow(_ackQueue[0]))
+        QueuedAck &head = _ackQueue[0];
+        if (!publishAck(head.ack, head.bytes, sizeof(head.bytes), &head.length))
         {
             return;
         }
-        memmove(&_ackQueue[0], &_ackQueue[1], sizeof(NivaloAck) * (_ackQueueCount - 1U));
+        for (size_t i = 1U; i < _ackQueueCount; i++)
+        {
+            _ackQueue[i - 1U] = _ackQueue[i];
+        }
         _ackQueueCount--;
     }
 }
@@ -102,7 +138,14 @@ void NivaloDevice::bufferTelemetry(const char *envelope, size_t length)
         _droppedBatches++;
     }
     const uint8_t tail = (_telemetryBufferHead + _telemetryBufferCount) % 8U;
-    _telemetryBuffer[tail] = String(envelope).substring(0, length);
+    _telemetryBuffer[tail] = envelope;
+    if (_telemetryBuffer[tail].length() != length)
+    {
+        // The copy failed (heap): the batch is lost, and counted.
+        _telemetryBuffer[tail] = "";
+        _droppedBatches++;
+        return;
+    }
     _telemetryBufferCount++;
 }
 
@@ -188,9 +231,15 @@ bool NivaloDevice::addTelemetry(const char *name, double value, const char *unit
     {
         return false;
     }
-    if (_batch.addValue(name, value, unit))
+    bool full = false;
+    if (_batch.addValue(name, value, unit, &full))
     {
         return true;
+    }
+    if (!full)
+    {
+        // Invalid input: refused, the pending sample is unchanged.
+        return false;
     }
     // The batch is full (readings or bytes): publish it and continue in a fresh one.
     publishBatch();
@@ -203,9 +252,14 @@ bool NivaloDevice::addTelemetryRaw(const char *name, const char *raw, const char
     {
         return false;
     }
-    if (_batch.addRaw(name, raw, unit))
+    bool full = false;
+    if (_batch.addRaw(name, raw, unit, &full))
     {
         return true;
+    }
+    if (!full)
+    {
+        return false;
     }
     publishBatch();
     return openSample() && _batch.addRaw(name, raw, unit);

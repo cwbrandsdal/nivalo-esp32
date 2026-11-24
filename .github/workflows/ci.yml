@@ -74,7 +74,7 @@ jobs:
           key: platformio-6.1.19-${{ runner.os }}-${{ hashFiles('examples/*/platformio.ini') }}
           restore-keys: |
             platformio-6.1.19-${{ runner.os }}-
-      - name: Build standalone example
-        run: pio run --project-dir examples/Esp32Only --environment featheresp32
+      - name: Build standalone example (staging and production)
+        run: pio run --project-dir examples/Esp32Only --environment featheresp32 --environment featheresp32-production
       - name: Build ESP32-STM32 bridge example
         run: pio run --project-dir examples/Esp32Stm32Bridge --environment featheresp32

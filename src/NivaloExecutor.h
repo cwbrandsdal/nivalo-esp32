@@ -31,7 +31,7 @@ enum NivaloFunctionOutcome
     NIVALO_FUNCTION_FAILED = 1,
     // The effect may have happened (timeout, error after an output may have changed).
     NIVALO_FUNCTION_UNKNOWN = 2,
-    // Still running; the application reports the outcome later.
+    // Still running; the application reports the outcome later with the invocation's token.
     NIVALO_FUNCTION_PENDING = 3
 };
 
@@ -41,7 +41,10 @@ enum NivaloDownloadOutcome
     // the image passed validation.
     NIVALO_DOWNLOAD_VERIFIED = 0,
     NIVALO_DOWNLOAD_REJECTED = 1,
-    NIVALO_DOWNLOAD_PENDING = 2
+    NIVALO_DOWNLOAD_PENDING = 2,
+    // Stopped because NivaloExecutor::deadlinePermits() failed: the image could no longer be
+    // activated. The executor records expired or clock_unsynced from a fresh reading.
+    NIVALO_DOWNLOAD_ABORTED = 3
 };
 
 enum NivaloActivationOutcome
@@ -51,6 +54,16 @@ enum NivaloActivationOutcome
     NIVALO_ACTIVATION_REJECTED = 1,
     // The call failed in a way that may have selected the image.
     NIVALO_ACTIVATION_UNCERTAIN = 2
+};
+
+enum NivaloRefreshOutcome
+{
+    // Every packet of the catalog was published.
+    NIVALO_REFRESH_COMPLETE = 0,
+    // Nothing was published (catalog unreadable or not storable, or the first packet failed).
+    NIVALO_REFRESH_NOT_STARTED = 1,
+    // Some packets were published, not all.
+    NIVALO_REFRESH_PARTIAL = 2
 };
 
 class NivaloExecutor;
@@ -68,13 +81,19 @@ public:
     // (NivaloExecutor::onTrustedSync), then returns a fresh reading.
     virtual NivaloClockReading readClock() = 0;
     virtual void publishAck(const NivaloAck &ack) = 0;
-    // Generic commands.
+    // Generic commands. prepareFunction() runs before the claim: it parses the operation's
+    // original argument bytes once into the object the handler will receive (refusing values
+    // that object cannot represent) and runs the handler's own argument check. invokePrepared()
+    // calls exactly that handler with exactly that object and does no other work first, so the
+    // executor's final clock reading is the last step before the effect. releasePrepared() frees
+    // the object; it is called after every prepareFunction().
     virtual bool hasFunction(const char *name) = 0;
-    virtual bool validArguments(const char *name, const char *argumentsJson) = 0;
-    virtual NivaloFunctionOutcome invokeFunction(const char *name, const char *argumentsJson) = 0;
-    virtual void refreshCatalog() = 0;
-    // OTA.
-    virtual NivaloDownloadOutcome downloadImage(const NivaloOperation &operation) = 0;
+    virtual bool prepareFunction(const NivaloOperation &operation) = 0;
+    virtual NivaloFunctionOutcome invokePrepared(uint32_t token) = 0;
+    virtual void releasePrepared() = 0;
+    virtual NivaloRefreshOutcome refreshCatalog() = 0;
+    // OTA. A download may call NivaloExecutor::deadlinePermits() while it runs.
+    virtual NivaloDownloadOutcome downloadImage(const NivaloOperation &operation, uint32_t token) = 0;
     virtual NivaloActivationOutcome activateImage() = 0;
     // SHA-256 (lowercase hex) of the first sizeBytes bytes of the running image's slot.
     virtual bool hashRunningSlot(uint32_t sizeBytes, char sha256Hex[65]) = 0;
@@ -96,16 +115,23 @@ public:
 
     // One identified downlink.
     void deliver(const NivaloOperation &operation);
-    // A handler that returned NIVALO_FUNCTION_PENDING finished.
-    void completeFunction(NivaloFunctionOutcome outcome);
-    // A download that returned NIVALO_DOWNLOAD_PENDING finished.
-    void completeDownload(NivaloDownloadOutcome outcome);
+    // The invocation identified by token, whose handler returned NIVALO_FUNCTION_PENDING,
+    // finished. Called on the executor's task only. False (and nothing changes) for a stale,
+    // unknown or zero token, for NIVALO_FUNCTION_PENDING, or when the terminal result could not be
+    // made durable; busy() ends only once it is.
+    bool completeFunction(uint32_t token, NivaloFunctionOutcome outcome);
+    // The download identified by token, which returned NIVALO_DOWNLOAD_PENDING, finished.
+    bool completeDownload(uint32_t token, NivaloDownloadOutcome outcome);
+    // A fresh clock reading against the active operation's deadline (section 9).
+    bool deadlinePermits();
     // A trusted SNTP synchronisation (section 9).
     void onTrustedSync(int64_t utcMs, int64_t monotonicUs);
     // After every birth and with every heartbeat: the journaled terminal ACK, from RAM.
     void republishResult();
 
     bool busy() const { return _busy; }
+    // The token of the claimed invocation; 0 when none is active.
+    uint32_t activeToken() const { return _busy ? _token : 0U; }
     // No downlink is accepted: missing, corrupt or unwritable journal.
     bool blocked() const { return _blocked; }
     const NivaloJournal &journal() const { return _journal; }
@@ -115,12 +141,18 @@ public:
 private:
     void execute(const NivaloOperation &operation);
     NivaloAckCode validate(const NivaloOperation &operation);
-    bool recheck();
-    void finish(const NivaloResult &result, bool deferred = false);
+    // A fresh reading against the deadline; on failure *result is the terminal failure and
+    // *deferred tells whether it waits for a valid clock.
+    bool recheck(NivaloResult *result, bool *deferred);
+    // Journals the terminal result; busy ends and the result is ACKed only once it is durable.
+    bool finish(const NivaloResult &result, bool deferred = false);
+    // Terminal result, then (only when that is durable) the pending record is cleared.
+    void finishOta(const NivaloResult &result, bool deferred = false);
     void afterDownload(NivaloDownloadOutcome outcome);
     void ack(NivaloOperationClass operationClass, const char *id, uint32_t seq, const NivaloResult &result,
              bool deferred = false);
     bool persist(const NivaloJournal &journal);
+    uint32_t nextToken();
 
     NivaloExecutorPlatform &_platform;
     NivaloOtaDevice *_ota = NULL;
@@ -129,6 +161,8 @@ private:
     bool _hasPending = false;
     bool _blocked = true;
     bool _busy = false;
+    uint32_t _token = 0U;
+    uint32_t _lastToken = 0U;
     NivaloDeadline _deadline;
     // The active operation.
     NivaloOtaManifest _manifest;

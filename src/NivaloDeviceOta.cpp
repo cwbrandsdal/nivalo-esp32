@@ -20,6 +20,9 @@ namespace
 static constexpr size_t ChunkBytes = 4096U;
 static constexpr unsigned long IdleTimeoutMs = 15000UL;
 static constexpr unsigned long ServiceIntervalMs = 250UL;
+// HTTP connect and response-header bounds (the TLS handshake bound is NivaloTlsHandshakeTimeoutS).
+static constexpr int32_t HttpConnectTimeoutMs = 5000;
+static constexpr uint16_t HttpReadTimeoutMs = 8000U;
 } // namespace
 
 NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &operation)
@@ -32,20 +35,30 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
         return NIVALO_DOWNLOAD_REJECTED;
     }
 
+    // The claim and its ACK may have taken a while: TLS starts only under the shared clock's
+    // validity and while the image could still be activated.
+    if (!_executor.deadlinePermits())
+    {
+        return NIVALO_DOWNLOAD_ABORTED;
+    }
     WiFiClientSecure tls;
     tls.setCACert(_apiCaCertificate != NULL ? _apiCaCertificate : NivaloConnection::defaultCaCertificate());
+    tls.setHandshakeTimeout(NivaloTlsHandshakeTimeoutS);
     HTTPClient http;
     // Pauses the NivaloLink transport in bridge builds and restores it on every return path.
     NivaloOtaSession session(_link.transport(), _otaPins, http);
     http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     http.setReuse(false);
-    http.setConnectTimeout(15000);
-    http.setTimeout(15000);
+    http.setConnectTimeout(HttpConnectTimeoutMs);
+    http.setTimeout(HttpReadTimeoutMs);
     if (!http.begin(tls, operation.url))
     {
         return NIVALO_DOWNLOAD_REJECTED;
     }
+    // GET blocks for DNS, connect, handshake and the response headers, each bounded.
+    feedWatchdog();
     const int status = http.GET();
+    feedWatchdog();
     const int contentLength = http.getSize();
     // An exact Content-Length is required: a chunked body would be read with its framing.
     if (status != HTTP_CODE_OK || contentLength < 0 || (uint32_t)contentLength != manifest.sizeBytes)
@@ -58,10 +71,6 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
     if (chunk == NULL)
     {
         return NIVALO_DOWNLOAD_REJECTED;
-    }
-    if (_watchdogEnabled)
-    {
-        esp_task_wdt_reset();
     }
     esp_ota_handle_t handle = 0;
     if (esp_ota_begin(target, manifest.sizeBytes, &handle) != ESP_OK)
@@ -78,6 +87,7 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
     uint32_t received = 0U;
     unsigned long lastData = millis();
     unsigned long lastService = 0U;
+    bool aborted = false;
     while (ok && received < manifest.sizeBytes)
     {
         if (millis() - lastService >= ServiceIntervalMs)
@@ -85,6 +95,14 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
             // Keep the session, presence and duplicate answers alive during the download.
             serviceWhileBusy();
             lastService = millis();
+            // A transfer that could no longer be activated stops at once instead of holding the
+            // executor (section 9: a fresh reading against the deadline).
+            if (!_executor.deadlinePermits())
+            {
+                aborted = true;
+                ok = false;
+                break;
+            }
         }
         const size_t available = stream == NULL ? 0U : (size_t)stream->available();
         if (available == 0U)
@@ -132,6 +150,11 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
     if (!ok)
     {
         esp_ota_abort(handle);
+        if (aborted)
+        {
+            Serial.println("Nivalo OTA: download stopped (expired or clock invalid)");
+            return NIVALO_DOWNLOAD_ABORTED;
+        }
         Serial.println("Nivalo OTA: image rejected (size, digest or embedded identity)");
         return NIVALO_DOWNLOAD_REJECTED;
     }
@@ -145,8 +168,10 @@ NivaloDownloadOutcome NivaloDevice::downloadFirmware(const NivaloOperation &oper
     return NIVALO_DOWNLOAD_VERIFIED;
 }
 
-NivaloDownloadOutcome NivaloDevice::Platform::downloadImage(const NivaloOperation &operation)
+NivaloDownloadOutcome NivaloDevice::Platform::downloadImage(const NivaloOperation &operation, uint32_t token)
 {
+    // Synchronous on this device: the token of the completion path is not needed.
+    (void)token;
     return _device.downloadFirmware(operation);
 }
 
@@ -194,10 +219,7 @@ bool NivaloDevice::Platform::hashRunningSlot(uint32_t sizeBytes, char sha256Hex[
         ok = esp_partition_read(running, offset, chunk, count) == ESP_OK &&
              mbedtls_sha256_update_ret(&sha, chunk, count) == 0;
         offset += (uint32_t)count;
-        if (_device._watchdogEnabled)
-        {
-            esp_task_wdt_reset();
-        }
+        _device.feedWatchdog();
     }
     uint8_t digest[32];
     ok = ok && mbedtls_sha256_finish_ret(&sha, digest) == 0;
