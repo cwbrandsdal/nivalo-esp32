@@ -77,17 +77,19 @@ public:
     }
     void bytes(uint8_t *output, size_t length)
     {
-        for (size_t i = 0U; i < length; i++)
+        if (_data == NULL || _length - _position < length || _position > _length)
         {
-            output[i] = byte();
+            _failed = true;
+            memset(output, 0, length);
+            return;
         }
+        memcpy(output, _data + _position, length);
+        _position += length;
     }
+    // width bytes into output, which holds width + 1 characters.
     void text(char *output, size_t width)
     {
-        for (size_t i = 0U; i < width; i++)
-        {
-            output[i] = (char)byte();
-        }
+        bytes(reinterpret_cast<uint8_t *>(output), width);
         output[width] = '\0';
     }
     bool failed() const { return _failed; }
