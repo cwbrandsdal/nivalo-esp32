@@ -1,6 +1,8 @@
 # Nivalo ESP32
 
-ESP32 Arduino/PlatformIO library for Nivalo devices.
+ESP32 Arduino/PlatformIO library for Nivalo devices. It implements Nivalo cloud
+MQTT **v1.1** (`nivalo-protocol` `specs/cloud-mqtt-v1.1.md`); protocol v1 is
+gone, with no dual-read.
 
 The explicit original-ESP32 browser-provisioning artifact build and its
 independent partition fingerprint procedure are documented in
@@ -12,27 +14,26 @@ independent partition fingerprint procedure are documented in
 
 ```text
 src/
-  NivaloDevice.h
-  NivaloDevice.cpp
-  NivaloConnection.*
-  NivaloReconnectPolicy.*
-  NivaloProtocol.*
-  NivaloOta.*
-  NivaloStatusPixel.*
-  NivaloDeviceLifecycle.cpp
-  NivaloDeviceCommand.cpp
-  NivaloDeviceOta.cpp
-  NivaloDeviceLink.cpp
-  NivaloDeviceSdk.cpp
-  NivaloDeviceMessaging.cpp
-  NivaloDeviceReports.cpp
-  NivaloDeviceSerial.cpp
-  NivaloLinkManager.h
-  NivaloLinkSpiTransport.h
-  NivaloLinkSpiTransport.cpp
+  NivaloDevice.h / NivaloDevice*.cpp   Arduino facade: session, uplinks, downlink inbox, OTA install
+  NivaloDeviceStore.*                  durable protocol state (NVS namespace nivalo-dev)
+  NivaloProvisioning.*                 setup access point, claim, CLI serial provisioning
+  NivaloConnection.*                   MQTT/TLS connection and reconnect policy
+  -- Arduino-free protocol units, compiled unchanged by the host tests --
+  NivaloWire.*        limits, UTC, UUID, names, text, JSON writer, topics
+  NivaloJsonStrict.*  strict JSON scanner (encoding, duplicates, depth, value count)
+  NivaloDownlink.*    commands/{id} and ota/{id} receiver and schema checks
+  NivaloClock.*       clock validity and the monotonic operation deadline
+  NivaloExecutor.*    the single executor and its journal transitions
+  NivaloJournal.*     journal, pending and floor records and their blob encodings
+  NivaloOtaPolicy.*   manifest signature, prechecks, image descriptor, reconciliation
+  NivaloImageIdentity.cpp  this image's product ID and security version
+  NivaloCatalog.*     capability revision, tombstones and refresh packets
+  NivaloUplink.*      envelope, availability, ACK, telemetry batch, event, state builders
+  NivaloLink*, NivaloOta.*, NivaloStatusPixel.*  bridge transport, pins, status LED
 examples/
   Esp32Only/
   Esp32Stm32Bridge/
+  NivaloRuntimeProvisioning/
 ```
 
 ## PlatformIO Dependency
@@ -63,14 +64,44 @@ Copy-Item .\include\nivalo_config.example.h .\include\nivalo_config.h
 
 New sketches should construct `NivaloDeviceConfig` and call `device.begin(config)`.
 It combines MQTT, pin-map, optional secondary UART, watchdog, NTP, and buffering
-settings. The positional `beginMqtt(...)` overload remains as a deprecated source
-compatibility shim.
+settings. `begin` returns `false` when the device cannot run a session, for
+example when its boot counter is missing (re-claim the device).
+
+### Product identity, staging and production
+
+Each image carries one product ID and security version, set per environment at
+build time:
+
+```ini
+build_flags =
+    -DNIVALO_PRODUCT_ID=\"<product UUID>\"
+    -DNIVALO_SECURITY_VERSION=<1..2147483647>
+    -DNIVALO_API_ORIGIN=\"https://iot-api.nivalo.io\"
+```
+
+Staging and production use **different product IDs**, so an image signed for one
+environment never installs on a device of the other. The `Esp32Only` example
+builds staging in `featheresp32` (product `064c6fb6-a7f6-4646-87e3-5df87e8634f1`,
+`https://iot-api-staging.nivalo.io`) and production in `featheresp32-production`
+(product `66f13a6e-6d3c-48ef-845c-86f18297e55b`, `https://iot-api.nivalo.io`).
+These product IDs must be registered with the matching platform environment.
+Raise `security_version` in `platformio.ini` with every release.
+
+The product ID the device accepts is the one compiled into its running image;
+moving a unit between environments takes a USB flash of the other
+environment's image. Without `NIVALO_PRODUCT_ID` (for example an Arduino IDE
+build) every OTA job is rejected.
+
+`NivaloMqttConfig::apiOrigin` names the API origin (`https://host[:port]`).
+Firmware is downloaded only from that origin; without it every OTA job is
+rejected.
 
 ## Runtime provisioning and claiming
 
 `NivaloProvisioning` removes compiled production Wi-Fi and MQTT credentials.
-On first boot it starts a `Nivalo-Setup-xxxxxx` SoftAP, wildcard DNS captive
-portal, and non-blocking web server. The user submits Wi-Fi plus an eight-character
+On first boot it starts a `Nivalo-Setup-xxxxxx` access point protected by the
+unit's setup code (below), a wildcard DNS captive portal and a non-blocking web
+server. The user submits Wi-Fi plus an eight-character
 one-use claim code. Wi-Fi is tried for a bounded 20 seconds. Once connected,
 provisioning starts SNTP and waits for a valid UTC clock using bounded attempts
 with backoff; claim HTTPS and MQTT identity validation fail closed until then.
@@ -98,6 +129,35 @@ three seconds; submitting a blank claim code changes Wi-Fi atomically while
 retaining the prior working identity until the new network connects. Calling
 `factoryReset()` explicitly removes both slots and re-enters setup.
 
+Committing a newly claimed identity also prepares its protocol state: a fresh
+command journal (`highWater` 0) for the new device ID and, if missing, the boot
+counter. Wi-Fi changes, credential resets and `factoryReset()` keep the setup
+code, the OTA floor, the journal and the boot counter (section 15 of the spec).
+
+### Setup access point and setup code
+
+Each unit has one owner-held setup code: 16 random uppercase Crockford Base32
+characters (80 bits), printed on the unit's private card. It is the **WPA2
+passphrase** of the setup access point and nothing else: it never appears in
+MQTT, claim requests, logs or any cloud API. The access point admits one
+station. There is no open access point: without a provisioned code the portal
+does not start (`lastError()` says so) and the unit can still be set up over USB.
+
+The code is provisioned over USB into the factory namespace `nivalo-fact`, which
+no reset clears:
+
+```json
+{"schema":"nivalo.cli.setup-code.v1","requestId":"<32 hex>","expectedHardwareId":"esp32-...","setupCode":"<16 Crockford Base32>"}
+```
+
+The response is `{"schema":"nivalo.cli.setup-code.v1","requestId":"...","ok":true}`;
+the code is never echoed. Sending a new code rotates it.
+
+**Limitation:** the portal itself stays on the Arduino stack and serves plain
+HTTP on the isolated setup network. WPA2 with the setup code is the protection;
+anyone who holds the code is inside the setup trust boundary. Secure boot, flash
+and NVS encryption and a stronger provisioning channel are later ESP-IDF work.
+
 Production storage requires ESP32 flash/NVS encryption. Startup fails closed when
 flash encryption is absent. Local boards may opt in with
 `allowUnencryptedNvsForLocalDevelopment`; the examples keep this off. Likewise,
@@ -112,6 +172,7 @@ Nivalo CLI. It listens on `Serial` by default (or the `Stream` selected through
 output:
 
 - `nivalo.cli.identify.v1` returns the factory MAC address and hardware ID;
+- `nivalo.cli.setup-code.v1` stores the unit's setup code (above);
 - `nivalo.cli.claim.v1` accepts that exact hardware ID, one bounded Wi-Fi
   object, and an eight-character one-use code matching
   `tests/cli_claim_request_v1.json`. It reuses the captive portal's
@@ -189,12 +250,21 @@ a credential into this repository. A future live cross-repository checkout
 must use a separate read-only deploy identity. The immutable pin remains the CI
 authority until such an identity is provisioned.
 
+## MQTT session (protocol v1.1)
+
+All topics are `nivalo/v1.1/devices/{deviceId}/{route}`: uplinks `telemetry`,
+`events`, `state`, `definitions`, `availability`, `commands/{id}/ack` and
+`ota/{id}/ack`; downlinks `commands/{id}` and `ota/{id}`, subscribed at QoS 1.
+Every envelope is `nivalo.iot.v1.1` with a fresh `messageId` and a `sentAt` from
+the device clock. Every message the device builds is re-checked with the strict
+scanner and the 3072-byte limit before it is published.
+
 MQTT uses certificate-validating TLS on production port `8883` or the isolated
 staging port `8884`; no other provisioned broker port is accepted. Configure new
-sketches through `NivaloMqttConfig`; the original positional `beginMqtt`
-overload remains available for source compatibility and also uses TLS. The
-built-in CA bundle trusts the current ISRG Root X1/X2 chains, and a custom
-broker CA can be supplied with `caCertificate`.
+sketches through `NivaloMqttConfig`. The built-in CA bundle trusts the current
+ISRG Root X1/X2 chains, and a custom broker CA can be supplied with
+`caCertificate`. The connection is MQTT 3.1.1 with a clean session and a 60 s
+keepalive.
 
 Plain MQTT is only available through the explicit
 `NIVALO_MQTT_TRANSPORT_PLAINTEXT_LOCAL` transport and is restricted to
@@ -203,120 +273,253 @@ The library rejects plaintext for `mqtt.nivalo.io` and other public hosts. Do
 not use `setInsecure`; certificate and hostname validation are part of the
 default connection contract.
 
-Application SDK dispatch, MQTT message publication, queued reports, UART
-adaptation, connection policy, protocol helpers, OTA ownership, and status-pixel
-state live in separate implementation units. `NivaloDevice` remains the public
-facade, while mutable runtime state—including the NeoPixel driver—is owned by
-each device instance.
+**Clock.** The clock is valid only after an SNTP synchronisation in this boot,
+at most 6 h old by the monotonic timer, with no backward step of more than 2 s
+since (it becomes valid again when a synchronisation reaches the last trusted
+instant). UTC is the last trusted synchronisation plus monotonic time. The
+library observes every SNTP synchronisation from before `setup()`; an
+application must not install its own SNTP notification callback. Without a
+valid clock the device opens no TLS/MQTT connection and sends nothing.
 
-NivaloLink invalid SPI frames are aggregated into at most one
-`esp32.nivalolink.frame_invalid` event per minute after the initial report. The
-event uses structured `data` with `error`, interval `count`, `dataReady`, and a
-12-byte hexadecimal `rxPrefix`, so the platform retains actionable diagnostics
-without persisting sampled raw MQTT envelopes or emitting one event per failed
-poll.
-
-After forwarding a command, the bridge waits for the secondary MCU's
-`DATA_READY` signal before polling for response frames. The existing one-second
-periodic poll remains the bounded fallback if that signal is unavailable.
+**Presence.** A persisted boot counter is advanced once per boot, before any
+connection; a RAM connection counter is advanced before every CONNECT attempt.
+`(boot, connection)` is the session epoch. Before each CONNECT the Last Will is
+rebuilt (fresh envelope, `end`/`will`, QoS 1, retained). After CONNECT both
+SUBSCRIBE packets must be written (PubSubClient cannot observe SUBACK);
+otherwise the device disconnects and retries. Then it publishes the retained
+`birth` (with its firmware identity and `targets: ["esp32"]`), refreshes its
+capability catalog and repeats the last terminal ACK. While connected it sends
+a non-retained `heartbeat` every 600 ± 30 s with uptime, heap, RSSI and dropped
+telemetry batches. `device.shutdown()` publishes the retained `end`/`shutdown`
+and disconnects. Heartbeats are free; a device needs no runtime telemetry for
+health.
 
 Connection management is non-blocking: failed attempts use exponential backoff
-from 1 to 60 seconds plus up to 25% random jitter. MQTT connects with a retained
-QoS 1 offline Last Will. SNTP is started during configuration and the client
-does not connect or publish envelopes until it can produce a real UTC `sentAt`;
-the former 1970 fallback is gone. The loop registers/resets the ESP task watchdog
-by default (30 seconds, configurable through `NivaloDeviceConfig`).
+from 1 to 60 seconds plus up to 25% random jitter. The loop registers/resets the
+ESP task watchdog by default (30 seconds, configurable through
+`NivaloDeviceConfig`).
 
-The retry timing policy is Arduino-free and has deterministic host coverage for
-attempt gating, jitter bounds, the 60-second cap, success reset, and 32-bit
-`millis()` rollover:
+## Telemetry, events and state
+
+Telemetry is batched: one message carries up to 8 samples and 24 readings, each
+sample observed at its own time. Usage is counted per 16 readings plus one per
+event, so batching costs nothing extra.
+
+```cpp
+device.addTelemetry("temp", 21.125, "C");     // opens a sample at the first reading
+device.addTelemetry("humidity", 41.5, "%");
+device.nextTelemetrySample();                // the next reading starts a new sample
+device.addTelemetryRaw("door", "open");
+device.flushTelemetry();                     // publishes the batch
+```
+
+A full batch is published automatically. `publishVariables()` publishes every
+registered variable as one sample, `publishTelemetry(name, value, unit)` one
+reading at once, and `publishRuntimeTelemetry()` `uptime_s`, `wifi_rssi` and
+heap figures as one sample. Values are exact decimals with at most six
+fractional digits within ±4294967295.999999; names, units and raw text follow
+the protocol's limits and are refused otherwise. Publish methods return 1 only
+for an actual MQTT publish.
+
+Set `mqtt.telemetryBufferCapacity` from 1 through 8 to keep telemetry messages in
+RAM while offline. Buffered messages keep their bytes (`messageId`, `sentAt`);
+when full, the oldest is discarded and counted in the heartbeat's
+`droppedBatches`. The buffer is volatile.
+
+`publishEvent(name, data, severity)` sends `data` as structured JSON when it is
+strict JSON and as `raw` text otherwise; `publishState(name, valueJson)` sends a
+state value. The `state.` event prefix is reserved.
+
+## Application functions and variables
+
+Functions take a JSON object of arguments and report what happened:
+
+```cpp
+bool ledState = false;
+
+bool validSetLed(JsonObjectConst arguments)
+{
+  return arguments.size() == 1U && arguments["state"].is<bool>();
+}
+
+NivaloFunctionOutcome setLed(JsonObjectConst arguments)
+{
+  ledState = arguments["state"].as<bool>();
+  digitalWrite(LED_BUILTIN, ledState ? HIGH : LOW);
+  return NIVALO_FUNCTION_SUCCEEDED;
+}
+
+NivaloFunctionMetadata metadata;
+metadata.displayName = "Set LED";
+metadata.argumentExample = "{\"state\":true}";
+metadata.returnType = "void";
+metadata.dangerLevel = "operational";
+metadata.validateArguments = validSetLed;
+
+device.function("setLed", setLed, metadata);
+device.variable("ledState", &ledState);
+```
+
+The validator runs before the operation is claimed (`false` rejects it as
+`invalid_command`); arguments never contain `null`. The handler is called at
+most once and returns:
+
+| Outcome | ACK |
+|---|---|
+| `NIVALO_FUNCTION_SUCCEEDED` | `succeeded` |
+| `NIVALO_FUNCTION_FAILED` (the effect certainly did not happen) | `failed` / `handler_failed` |
+| `NIVALO_FUNCTION_UNKNOWN` (the effect may have happened, e.g. a timeout after an output changed) | `indeterminate` / `execution_unknown` |
+| `NIVALO_FUNCTION_PENDING` (still running; call `device.completeFunction(outcome)` later) | `running` to duplicates until then |
+
+Handlers run from `device.loop()` and must not call it. `requestDefinitions` is
+built in. Reserved names (`flash`, `requestDefinitions`, `firmware.*`, `ota.*`
+in any case) and case twins of one kind are refused. Capacity is 8 functions
+and 12 variables; supported variable types are signed and unsigned `int`/`long`,
+`float`, `double`, `bool`, and Arduino `String`.
+
+**Catalog.** Register before the first connection. At the first connection the
+library compares the registered definitions with the catalog it reported last
+(revision, digest and names are kept in NVS): an unchanged catalog keeps its
+revision, any changed definition, rename or removal advances it and is stored
+before it is published. Removed names are kept as tombstones and re-sent as
+removes; a case-only rename always travels as its remove and upsert pair. After
+every birth and on `requestDefinitions` the whole catalog is published in
+packets of at most 8 operations. Registrations after that are refused.
+
+## Command execution
+
+Generic commands and OTA jobs share one per-device sequence and one durable
+journal: the highest consumed sequence and the record of that operation (ID,
+class, SHA-256 of the exact payload bytes, phase, result), one NVS blob that is
+read back after every write. All journal transitions run on one executor in
+`loop()`; the MQTT callback only validates, fingerprints and copies the
+downlink while PubSubClient's buffer is intact.
+
+| Delivery | Device action |
+|---|---|
+| sequence below the high-water mark | `indeterminate` / `replay_suppressed` |
+| same sequence, ID, class and payload bytes | `running` while busy, else the journaled result |
+| same sequence, anything different | `failed` / `id_conflict` |
+| higher sequence while busy | dropped, not consumed |
+| higher sequence | validate, check the clock, journal `claimed`, ACK `accepted`, re-check the clock and the monotonic deadline, run once, journal and ACK the result |
+
+The deadline is derived at the claim from `expiresAt` and only ever made earlier
+by later trusted synchronisations; expiry is checked on a fresh reading right
+before the effect. A `claimed` generic record found at boot becomes
+`indeterminate` / `execution_unknown`. The last terminal ACK is repeated after
+every birth and with every heartbeat from RAM (no NVS write per heartbeat). If
+the journal is missing, corrupt or cannot be written, the device accepts no
+downlinks until it is re-claimed (`device.needsReclaim()`).
+
+## Firmware updates (OTA)
+
+OTA jobs arrive on `ota/{id}` with a format-2 manifest. Before any download the
+device checks, in order: the `keyId` is in the compiled trust store, the ECDSA
+P-256 signature over
+`NIVALO-FIRMWARE-SIGNATURE-V2\n{target}\n{productId}\n{securityVersion}\n{sizeBytes}\n{sha256}\n`,
+the product ID equals this image's, the security version is above
+`max(running image's security version, committed floor)`, the size fits the
+inactive slot, and the URL's origin equals `apiOrigin` (scheme, host, effective
+port).
+
+The image then streams over certificate-validating HTTPS without redirects
+straight into the inactive slot; exactly `sizeBytes` bytes (an exact
+Content-Length is required), the SHA-256 and the embedded product ID and
+security version must match, and `esp_ota_end()` validates it. A pending record
+(sequence, product, version, size, digest) is written and read back, the clock
+and deadline are re-checked on a reading taken after that write, and only then
+is `esp_ota_set_boot_partition()` called, exactly once. A definite refusal is a
+zero-effect `ota_rejected`; an uncertain failure keeps the claim and reboots.
+At boot, before connecting, a claimed OTA record with a matching pending record
+is reconciled by hashing exactly `sizeBytes` bytes of the running slot: on a
+match the floor is committed, then `succeeded` is journaled, then the pending
+record is cleared; otherwise `indeterminate` / `execution_unknown`.
+
+Populate `firmwareSigningKeys` with ECDSA P-256 SubjectPublicKeyInfo PEM values
+selected by exact `keyId`; an empty trust set rejects every OTA job. Provision
+only public keys on devices. For rotation, first deploy firmware that trusts
+both the new current key and the immediately previous key, begin signing
+artifacts with the new key after that firmware is established, and remove the
+previous key only after the fleet migration window closes. Private signing keys
+belong in the signing service's guarded key store, never in this repository,
+device configuration or test fixtures; release key IDs never start with
+`test-`.
+
+This is application-level downgrade protection. Physical flash access, NVS
+erase and bootloader bypass are outside it; secure boot, flash encryption and
+hardware rollback are later ESP-IDF work.
+
+## Secondary MCU bridge
+
+Bridge builds (`NIVALO_HAS_SECONDARY_MCU=1`) keep compiling and forward the
+MCU's telemetry and events over NivaloLink and UART as v1.1 uplinks. They do not
+advertise MCU execution or STM32 OTA in v1.1: the birth lists only `esp32`,
+commands run only on registered ESP32 functions, and MCU definitions and
+command status frames are not reported. STM32 SWD programming was removed from
+the command path (it remains in history at `4e0368d`,
+`src/NivaloDeviceOta.cpp`); the bridge profile and its DAP defects are tracked
+in issue #31.
+
+NivaloLink invalid SPI frames are aggregated into at most one
+`esp32.nivalolink.frame_invalid` event per minute after the initial report.
+After forwarding a command, the bridge waits for the secondary MCU's
+`DATA_READY` signal before polling for response frames. Bridge builds send a
+payload-bounded, identifier-free NivaloLink HELLO at link startup and every 30
+seconds.
+
+`NivaloPinMap` replaces fixed SWD and NivaloLink SPI constants. Defaults preserve
+the original board wiring, while products can supply their own map before begin.
+Bridge builds use the repository-local maintained Adafruit DAP fork under
+`third_party/adafruit-dap-nivalo/`. It vendors official tag `1.8.3` with commit,
+license, and per-file hash provenance, adds STM32 ID `0x421` in maintained
+source, and uses explicit local dependency paths—never a build-time patch.
+
+## Host tests
+
+The protocol units are Arduino-free and compiled unchanged for the host. The
+tests replay `nivalo-protocol`'s `fixtures/v1.1` against them:
+
+- `nivalo_v11_wire_tests`: every message in `messages.json` through the strict
+  scanner and the downlink receiver, and the schema fixtures of every payload
+  the device receives;
+- `nivalo_v11_execution_tests`: `vectors/command-execution.json` (journal,
+  deadline, clock validity, fingerprints, OTA install and boot reconciliation,
+  power loss) through the real parser and executor;
+- `nivalo_v11_ota_tests`: `vectors/ota.json` (canonical bytes, signatures and
+  mutations, prechecks), the image descriptor and the record encodings;
+- `nivalo_v11_catalog_tests`: a port of the reference merge proven against
+  `vectors/capability-merge.json`, then fed the firmware's own refresh packets
+  across releases (unchanged, changed, removed, renamed);
+- `nivalo_v11_uplink_tests` and `nivalo_v11_uplink_reference_model`: every
+  uplink the builders produce is replayed through the protocol's reference
+  model (`tests/protocol_v1_1.py`) by `tests/validate_v11_uplinks.py`.
+
+The presence, command-dispatch and ingest-metering vectors describe the server
+and are not replayed here.
 
 ```sh
-cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release
+cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release -DNIVALO_PROTOCOL_DIR=../nivalo-protocol
 cmake --build build/host --parallel
 ctest --test-dir build/host --output-on-failure
 ```
 
-Set `mqtt.telemetryBufferCapacity` from 1 through 8 to enable the optional
-in-memory bounded telemetry queue. Publish methods now return 1 only for an
-actual MQTT publish; an offline sample may be buffered but returns 0. When full,
-the oldest buffered sample is discarded. The queue is intentionally volatile.
-
-`NivaloPinMap` replaces fixed SWD and NivaloLink SPI constants. Defaults preserve
-the original board wiring, while products can supply their own map before begin.
-Bridge builds send a payload-bounded, identifier-free NivaloLink HELLO at link
-startup and every 30 seconds. This lets a secondary MCU re-establish protocol
-identity after either side resets without waiting for a cloud command. The
-existing 30-second heartbeat remains separate; both exchanges use the same
-CRC-checked fixed frame transport.
-
-## Signed firmware and recovery
-
-Firmware flashing is fail-closed. Populate `firmwareSigningKeys` with ECDSA
-P-256 SubjectPublicKeyInfo PEM values selected by exact `keyId`; an empty trust
-set rejects every flash command. A command must contain the protocol-defined
-`ecdsa-p256-sha256` signature over the exact canonical manifest. The device
-verifies that signature, downloads to durable SPIFFS storage, then independently
-checks the staged file's exact byte count and SHA-256 before `Update.begin` or
-any STM32 erase/program operation. Missing signatures, unknown keys, malformed
-DER/Base64, and target/size/hash/image tampering produce failed ACKs and events.
-
-Provision only public keys on devices. For rotation, first deploy firmware that
-trusts both the new current key and the immediately previous key, begin signing
-artifacts with the new key after that firmware is established, and remove the
-previous key only after the fleet migration window closes. Private signing keys
-belong in the signing service's guarded key store, never in this repository,
-device configuration, SPIFFS, or deterministic test fixtures. The checked-in
-vectors use public-only, non-production fixture keys.
-
-STM32 programming additionally requires one explicit recovery mode:
-
-- `preserveKnownGoodStm32Image` plus the exact known-good image size reads the
-  running target back to durable storage and verifies that snapshot before erase.
-- `stm32GoldenImagePath`, size, and SHA-256 select a pre-provisioned golden image;
-  the file is verified before erase.
-
-Every STM32 update receives a full byte-for-byte SWD read-back. A program or
-verification failure automatically restores the recovery image, verifies the
-restore, and reports whether recovery succeeded. If recovery is not configured
-or cannot be prepared, programming is refused.
-
-Storage capacity is a deployment constraint, not a compile-time assumption.
-ESP32 updates need free SPIFFS space at least equal to signed `sizeBytes`.
-Snapshot-based STM32 updates need the staged update plus the configured
-known-good image size; golden mode needs both files to coexist. The library
-checks current free space and file sizes and rejects safely when capacity is
-insufficient. Select and validate an ESP32 partition layout for the largest
-supported artifacts before deployment.
-
-OTA owns its SWD adapter and uses an RAII session to restore NivaloLink/pin/HTTP
-state on every return path. Network shutdown is explicit only at the transition
-to ESP32 Update or exclusive SWD programming; all error/return cleanup is owned
-by the session destructor. The unused 462 KB compiled bootloader header was
-removed. Bridge builds use the repository-local maintained Adafruit DAP fork;
-there is no dependency-source mutation or build-time patch.
-
-The maintained fork is active for repository bridge builds under
-`third_party/adafruit-dap-nivalo/`. It vendors official tag `1.8.3` with commit,
-license, and per-file hash provenance, adds STM32 ID `0x421` in maintained
-source, and uses explicit local dependency paths—never a build-time patch.
-Repository builds pin Espressif32 7.0.1 and every external Arduino dependency
-to an exact version; the framework-provided `SD` library remains local to the
-pinned Espressif32 platform. ESP32 CI validates only this repository and the
-pinned protocol contracts. The examples repository owns its cross-repository
-builds against one immutable ESP32 commit, avoiding a circular CI dependency.
+CMake downloads ArduinoJson 6.21.6 and mbedtls 2.28.7 (the version bundled
+with Arduino-ESP32 2.0.17) by pinned SHA-256. The reference-model test needs
+Python with `jsonschema==4.25.1` and `rfc3339-validator==0.1.4`.
 
 CI is one Linux job for pull requests and pushes to `main`: the host CTest
-suite, the signature, claim, schema and DAP provenance checks, the Python tooling
-tests, Arduino Lint (specification), and cached PlatformIO builds of the
-standalone and bridge examples (`featheresp32` environment of each). The
-browser-provisioning, NodeMCU and Arduino-sketch builds, the factory-image
-inspection and the clean-cache registry archive builds run in the
-`Registry release` workflow (see `docs/registry-release.md`).
+suite against the pinned protocol commit (`NIVALO_PROTOCOL_REF`), the claim and
+DAP provenance checks, the Python tooling tests, Arduino Lint (specification),
+and cached PlatformIO builds of the standalone and bridge examples
+(`featheresp32` environment of each). The browser-provisioning, production,
+NodeMCU and Arduino-sketch builds, the factory-image inspection and the
+clean-cache registry archive builds run in the `Registry release` workflow (see
+`docs/registry-release.md`).
 
-No remote or package has been created. Until publication, external bridge
-consumers must supply the fork explicitly rather than relying on registry
-dependency resolution.
+Repository builds pin Espressif32 7.0.1 and every external Arduino dependency
+to an exact version; the framework-provided `SD` library remains local to the
+pinned Espressif32 platform. The examples repository owns its cross-repository
+builds against one immutable ESP32 commit, avoiding a circular CI dependency.
 
 ## Registry metadata
 
@@ -325,98 +528,3 @@ describe release 0.2.0 and its dependencies. They are ready for a later reviewed
 publication workflow; this repository change does not publish externally. See
 `docs/registry-release.md` for immutable tag rules, dry-run packaging, named
 Actions credentials, Arduino readiness gates, and rollback/deprecation steps.
-
-## Runtime Telemetry
-
-Call `device.publishRuntimeTelemetry()` from the sketch loop to publish the portal's standard runtime vitals:
-
-- `uptime_ms`
-- `wifi_rssi`
-- `heap_used`
-- `heap_free`
-- `heap_total`
-
-Sketches should prefer this helper over hand-written telemetry names for common ESP32 health metrics.
-
-## Application functions, variables, and commands
-
-Standalone sketches can expose application behavior without a secondary MCU:
-
-```cpp
-int ledState = 0;
-
-int setLed(String argument) {
-  ledState = argument == "on" ? 1 : 0;
-  return ledState; // negative means failed; non-negative means succeeded
-}
-
-NivaloFunctionMetadata setLedMetadata;
-setLedMetadata.displayName = "Set LED";
-setLedMetadata.description = "Turns the built-in LED on or off.";
-setLedMetadata.argumentExample = "\"on\"";
-setLedMetadata.dangerLevel = "operational";
-
-device.function("setLed", setLed, setLedMetadata);
-device.variable("ledState", &ledState);
-```
-
-Applications that already configure SNTP and a local timezone can keep
-ownership of that clock setup by setting `mqtt.configureClock = false`.
-Nivalo still publishes UTC timestamps from `time()` without changing the
-application's timezone.
-
-Register before MQTT connects. The library publishes protocol-valid function
-and variable definitions automatically at connection time and republishes when
-a registration is added while connected. Registered references must remain
-valid for the lifetime of the device. Capacity is intentionally bounded to 8
-functions and 12 variables; duplicate, empty, overlong, null, or excess
-registrations return `false`.
-
-The metadata overload is additive; existing `function(name, handler)` sketches
-keep the default integer return type, 30-second timeout, safe danger level, and
-registration-order sorting. Supported danger levels are `safe`, `operational`,
-`disruptive`, and `dangerous`. Metadata is copied during registration, so the
-input structure does not need to remain alive afterward.
-
-`device.publishVariables()` snapshots every registered reference to telemetry;
-the standalone example calls it periodically. Supported references are signed
-and unsigned `int`/`long`, `float`, `double`, `bool`, and Arduino `String`.
-
-A named `function` runs before any bridge fallback. The library publishes the
-accepted ACK on receipt and a succeeded/failed ACK after the handler returns. A
-generic handler can cover commands that are not named functions:
-
-```cpp
-NivaloCommandResult handleCommand(String name, String arguments, String &message) {
-  if (name != "calibrate") return NIVALO_COMMAND_UNHANDLED;
-  message = "Calibration complete";
-  return NIVALO_COMMAND_SUCCEEDED;
-}
-
-device.onCommand(handleCommand);
-```
-
-Returning `NIVALO_COMMAND_UNHANDLED` preserves the existing behavior: bridge
-builds forward the command to NivaloLink; standalone builds publish a failed
-unsupported-command ACK. The API uses the existing command, definitions, and
-ACK schemas and introduces no wire-format variant.
-
-Completed standalone function and generic-handler results are cached by
-platform command ID in a bounded eight-entry FIFO. If the gateway redelivers an
-ID, the device republishes the cached terminal ACK without executing the
-application handler again. Reusing an ID for a different command fails closed.
-The cache is intentionally volatile: an ESP32 restart clears it.
-
-## Command ACK compatibility
-
-Command acknowledgements use the canonical
-`nivalo/v1/devices/{deviceId}/commands/{commandId}/ack` topic. Until the
-protocol migration window closes on 2027-01-31 UTC, the library also publishes
-the identical envelope to `nivalo/v1/devices/{deviceId}/acks/{commandId}`.
-Consumers deduplicate the two deliveries by `messageId`. Define
-`NIVALO_PUBLISH_LEGACY_COMMAND_ACKS=0` only when every connected consumer accepts
-the canonical topic.
-
-When a cloud command includes `requestedBy`, bridge builds preserve it in the
-NivaloLink command sent to the secondary MCU. This value is attribution only,
-not an authorization credential.
