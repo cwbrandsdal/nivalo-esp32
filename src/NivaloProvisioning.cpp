@@ -217,6 +217,7 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
     {
         _credentials = *_config.localDeveloperFixture;
         if (!_credentials.valid()) { setError("Local developer fixture is invalid"); return false; }
+        if (!prepareDeviceState(_credentials.deviceId, false)) { setError("Device state could not be initialized"); return false; }
         startWifi(_credentials.wifiSsid, _credentials.wifiPassword); return true;
     }
     if (!storeAvailable)
@@ -242,7 +243,7 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
     {
         // The A/B selector is the commit point. A reset can occur after it is
         // switched but before pending cleanup; never exchange that claim again.
-        if (!_store.clearPending())
+        if (!prepareDeviceState(_credentials.deviceId, true) || !_store.clearPending())
         {
             setError("Committed claim cleanup recovery failed");
             return false;
@@ -382,9 +383,11 @@ void NivaloProvisioning::loop()
         if (exchangeClaim() && verifyExistingIdentity() && _store.commit(_pending))
         {
             _credentials = _pending;
-            if (!_store.clearPending())
+            // A newly claimed device ID starts with highWater 0 and a boot counter.
+            const bool prepared = prepareDeviceState(_credentials.deviceId, true);
+            if (!_store.clearPending() || !prepared)
             {
-                _lastError = "Committed claim cleanup failed";
+                _lastError = prepared ? "Committed claim cleanup failed" : "Device state could not be initialized";
                 failCliClaim();
                 _state = NIVALO_PROVISIONING_ERROR;
             }
@@ -482,6 +485,11 @@ void NivaloProvisioning::handleCliLine(char *line, size_t length)
     {
         if (!handleCliClaim(root, requestId))
             sendCliClaimResponse(requestId, false);
+    }
+    else if (schema == "nivalo.cli.setup-code.v1")
+    {
+        // The code is never echoed or logged; the response only says whether it is stored.
+        sendCliResponse("nivalo.cli.setup-code.v1", requestId, handleCliSetupCode(root));
     }
 }
 
@@ -659,7 +667,50 @@ bool NivaloProvisioning::finishCliProvisioning(const NivaloRuntimeCredentials &r
                                : NivaloCliTransaction::resume(operations);
     if (!completed) return false;
     _credentials = operations.committed;
-    return true;
+    // Manual credential issuance keeps the journal of an unchanged device ID.
+    return prepareDeviceState(_credentials.deviceId, false);
+}
+
+bool NivaloProvisioning::prepareDeviceState(const String &deviceId, bool newlyClaimed)
+{
+    const bool prepared = _deviceState.prepareIdentity(deviceId.c_str(), newlyClaimed);
+    _deviceState.end();
+    return prepared;
+}
+
+bool NivaloProvisioning::loadSetupCode(char code[17])
+{
+    Preferences factory;
+    if (!factory.begin("nivalo-fact", true))
+    {
+        return false;
+    }
+    const size_t length = factory.getString("setupCode", code, 17U);
+    factory.end();
+    return length == 17U && NivaloCliProvisioningPolicy::isSetupCode(code, 16U);
+}
+
+bool NivaloProvisioning::handleCliSetupCode(JsonObject root)
+{
+    if (!_cliProvisioningAllowed || root.size() != 4U || !root["expectedHardwareId"].is<const char *>() ||
+        !root["setupCode"].is<const char *>()) return false;
+    const String expectedHardwareId = root["expectedHardwareId"].as<String>();
+    const char *code = root["setupCode"].as<const char *>();
+    if (expectedHardwareId != hardwareId() || !NivaloCliProvisioningPolicy::isSetupCode(code, strlen(code))) return false;
+    Preferences factory;
+    if (!factory.begin("nivalo-fact", false)) return false;
+    char stored[17] = {0};
+    const bool written = factory.putString("setupCode", code) == 16U &&
+                         factory.getString("setupCode", stored, sizeof(stored)) == sizeof(stored) &&
+                         strcmp(stored, code) == 0;
+    factory.end();
+    memset(stored, 0, sizeof(stored));
+    if (written && _state == NIVALO_PROVISIONING_ERROR && !_credentials.valid())
+    {
+        // The portal could not open without a code; it can now.
+        startPortal();
+    }
+    return written;
 }
 
 void NivaloProvisioning::sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity)
@@ -728,9 +779,27 @@ void NivaloProvisioning::startPortal()
     // Entering local setup terminates any in-flight serial claim. This also
     // covers explicit setup-button and factory-reset interruptions.
     failCliClaim();
+    // The setup access point is WPA2-protected by the unit's setup code; there is no open
+    // fallback. The portal itself is plain HTTP on that isolated network (see README).
+    char setupCode[17] = {0};
+    if (!loadSetupCode(setupCode))
+    {
+        stopPortal();
+        WiFi.softAPdisconnect(true);
+        setError("Setup code is not provisioned; provision it over USB (nivalo.cli.setup-code.v1)");
+        return;
+    }
     WiFi.disconnect(false, false); WiFi.mode(WIFI_AP);
     String ap = String(_config.softApPrefix) + "-" + hardwareId().substring(hardwareId().length() - 6U);
-    WiFi.softAP(ap.c_str()); _dns.start(53, "*", WiFi.softAPIP());
+    const bool apStarted = WiFi.softAP(ap.c_str(), setupCode, 1, 0, 1);
+    memset(setupCode, 0, sizeof(setupCode));
+    if (!apStarted)
+    {
+        stopPortal();
+        setError("Setup access point could not start");
+        return;
+    }
+    _dns.start(53, "*", WiFi.softAPIP());
     if (!_portalRunning)
     {
         _web.on("/", HTTP_GET, [this]() { handlePortalRoot(); });

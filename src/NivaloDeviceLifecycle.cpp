@@ -1,5 +1,6 @@
 #include "NivaloDevice.h"
 
+#include <esp_ota_ops.h>
 #include <esp_task_wdt.h>
 #include <stdlib.h>
 
@@ -140,17 +141,12 @@ static bool isLocalBrokerHost(const char *host)
     return false;
 }
 
-NivaloDevice::NivaloDevice()
+NivaloDevice::NivaloDevice() : _platform(*this), _executor(_platform)
 {
     _hardSerial = NULL;
     _baud = 0;
     _mqttPort = 8883;
     _mqttTransport = NIVALO_MQTT_TRANSPORT_TLS;
-    _firmwareSigningKeys = NULL;
-    _firmwareSigningKeyCount = 0U;
-    _preserveKnownGoodStm32Image = false;
-    _knownGoodStm32ImageSizeBytes = 0U;
-    _stm32GoldenImageSizeBytes = 0U;
 }
 
 boolean NivaloDevice::begin(HardwareSerial &hardSerial, unsigned long baud)
@@ -165,8 +161,8 @@ boolean NivaloDevice::begin(HardwareSerial &hardSerial, unsigned long baud)
 boolean NivaloDevice::begin(unsigned long baud)
 {
     _statusPixel.begin();
-    _ota.configure(_pins.ota);
-    _ota.releasePins();
+    _otaPins.configure(_pins.ota);
+    _otaPins.releasePins();
     _baud = baud;
 
 #if NIVALO_HAS_SECONDARY_MCU
@@ -192,41 +188,29 @@ boolean NivaloDevice::begin(const NivaloDeviceConfig &config)
     return deviceReady && beginMqtt(config.mqtt);
 }
 
-boolean NivaloDevice::beginMqtt(
-    const char *deviceId,
-    const char *clientId,
-    const char *username,
-    const char *password,
-    const char *host,
-    uint16_t port,
-    const char *firmwareVersion,
-    const char *hardwareName,
-    String macAddress)
-{
-    NivaloMqttConfig config;
-    config.deviceId = deviceId;
-    config.clientId = clientId;
-    config.username = username;
-    config.password = password;
-    config.host = host;
-    config.port = port;
-    config.firmwareVersion = firmwareVersion;
-    config.hardwareName = hardwareName;
-    config.macAddress = macAddress;
-    return beginMqtt(config);
-}
-
 boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
 {
-    if (config.deviceId == NULL || strlen(config.deviceId) == 0U ||
+    if (config.deviceId == NULL || !nivaloIsUuid(config.deviceId) ||
         config.clientId == NULL || strlen(config.clientId) == 0U ||
         config.username == NULL || strlen(config.username) == 0U ||
         config.password == NULL || strlen(config.password) == 0U ||
-        config.host == NULL || strlen(config.host) == 0U || config.port == 0U ||
-        config.firmwareVersion == NULL || strlen(config.firmwareVersion) == 0U ||
-        config.hardwareName == NULL || strlen(config.hardwareName) == 0U)
+        config.host == NULL || strlen(config.host) == 0U || config.port == 0U)
     {
-        Serial.println("MQTT configuration rejected: required value missing");
+        Serial.println("MQTT configuration rejected: required value missing or device ID not canonical");
+        return false;
+    }
+    NivaloFirmwareInfo firmware;
+    firmware.version = config.firmwareVersion;
+    firmware.hardware = config.hardwareName;
+    if (!nivaloValidFirmwareInfo(firmware))
+    {
+        Serial.println("MQTT configuration rejected: firmware version and hardware must be 1-64 bytes of text");
+        return false;
+    }
+    NivaloOrigin origin;
+    if (config.apiOrigin != NULL && !nivaloParseHttpsOrigin(config.apiOrigin, false, &origin))
+    {
+        Serial.println("MQTT configuration rejected: apiOrigin must be https://host[:port]");
         return false;
     }
 
@@ -277,7 +261,6 @@ boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
 
     _statusPixel.set(255, 0, 0);
 
-    _macAddr = config.macAddress;
     _deviceId = config.deviceId;
     _clientId = config.clientId;
     _username = config.username;
@@ -285,36 +268,81 @@ boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
     _mqttHost = config.host;
     _mqttPort = config.port;
     _mqttTransport = config.transport;
-    _firmwareSigningKeys = config.firmwareSigningKeys;
-    _firmwareSigningKeyCount = config.firmwareSigningKeyCount;
-    _preserveKnownGoodStm32Image = config.preserveKnownGoodStm32Image;
-    _knownGoodStm32ImageSizeBytes = config.knownGoodStm32ImageSizeBytes;
-    _stm32GoldenImagePath = config.stm32GoldenImagePath == NULL ? "" : config.stm32GoldenImagePath;
-    _stm32GoldenImageSizeBytes = config.stm32GoldenImageSizeBytes;
-    _stm32GoldenImageSha256 = config.stm32GoldenImageSha256 == NULL ? "" : config.stm32GoldenImageSha256;
     _firmwareVersion = config.firmwareVersion;
     _hardwareName = config.hardwareName;
+    _firmware.version = _firmwareVersion.c_str();
+    _firmware.hardware = _hardwareName.c_str();
+    _apiOrigin = config.apiOrigin == NULL ? "" : config.apiOrigin;
+    _apiCaCertificate = config.apiCaCertificate;
     _telemetryBufferCapacity = min((uint8_t)8U, config.telemetryBufferCapacity);
+    _topics.configure(_deviceId.c_str());
+
+    // The SNTP observer is installed before setup(); syncs made during provisioning are queued.
     if (config.configureClock)
     {
-        _protocol.beginClock(config.primaryNtpServer, config.secondaryNtpServer);
+        configTime(0, 0, config.primaryNtpServer == NULL ? "pool.ntp.org" : config.primaryNtpServer,
+                   config.secondaryNtpServer == NULL ? "time.cloudflare.com" : config.secondaryNtpServer);
+    }
+    pumpClock();
+
+    // Persistent protocol state. The boot counter is advanced once per boot, before any MQTT
+    // connection, and the epoch it starts never repeats for this device ID (section 8.1).
+    _sessionReady = false;
+    if (!_store.begin())
+    {
+        Serial.println("Nivalo: device state storage could not be opened");
+        return false;
+    }
+    uint32_t boot = 0U;
+    const NivaloStoreRead bootRead = _store.loadBoot(&boot);
+    if (bootRead != NIVALO_STORE_OK || boot >= 0xFFFFFFFEUL || !_store.writeBoot(boot + 1U))
+    {
+        Serial.println("Nivalo: boot counter missing or unwritable; the device must be re-claimed");
+        return false;
+    }
+    _epoch.boot = boot + 1U;
+    _epoch.connection = 0U;
+
+    // OTA: the running image's own identity, the committed floor of its product, the slot size.
+    const NivaloImageIdentity &running = nivaloRunningImageIdentity();
+    const esp_partition_t *inactive = esp_ota_get_next_update_partition(NULL);
+    _ota.keys = config.firmwareSigningKeys;
+    _ota.keyCount = config.firmwareSigningKeyCount;
+    _ota.productId = running.productId;
+    _ota.runningSecurityVersion = running.securityVersion;
+    _ota.committedFloor = _store.loadFloor(running.productId);
+    _ota.maxImageBytes = inactive == NULL ? 0U : inactive->size;
+    _ota.apiOrigin = config.apiOrigin == NULL ? NULL : _apiOrigin.c_str();
+
+    // Reconcile a claimed operation before connecting (section 11.4 step 4).
+    NivaloJournal journal;
+    const NivaloStoreRead journalRead = _store.loadJournal(&journal);
+    NivaloPendingRecord pending;
+    const NivaloStoreRead pendingRead = _store.loadPending(&pending);
+    if (pendingRead == NIVALO_STORE_CORRUPT)
+    {
+        (void)_store.clearPending();
+    }
+    _executor.begin(_deviceId.c_str(), journalRead == NIVALO_STORE_OK ? &journal : NULL,
+                    pendingRead == NIVALO_STORE_OK ? &pending : NULL, &_ota, running);
+    if (_executor.blocked())
+    {
+        Serial.println("Nivalo: command journal missing or unusable; commands are refused until re-claimed");
+    }
+    NivaloCatalogState catalog;
+    _catalogReady = _store.loadCatalog(&catalog) == NIVALO_STORE_OK;
+    if (_catalogReady)
+    {
+        _catalog = catalog;
     }
 
-    snprintf(_telemetryTopic, sizeof(_telemetryTopic), "nivalo/v1/devices/%s/telemetry", _deviceId.c_str());
-    snprintf(_stateTopic, sizeof(_stateTopic), "nivalo/v1/devices/%s/state", _deviceId.c_str());
-    snprintf(_eventsTopic, sizeof(_eventsTopic), "nivalo/v1/devices/%s/events", _deviceId.c_str());
-    snprintf(_definitionsTopic, sizeof(_definitionsTopic), "nivalo/v1/devices/%s/definitions", _deviceId.c_str());
-    snprintf(_availabilityTopic, sizeof(_availabilityTopic), "nivalo/v1/devices/%s/availability", _deviceId.c_str());
-    snprintf(_commandsTopic, sizeof(_commandsTopic), "nivalo/v1/devices/%s/commands/+", _deviceId.c_str());
-    snprintf(_commandAckTopicPrefix, sizeof(_commandAckTopicPrefix), "nivalo/v1/devices/%s/commands/", _deviceId.c_str());
-    snprintf(_legacyAckTopicPrefix, sizeof(_legacyAckTopicPrefix), "nivalo/v1/devices/%s/acks/", _deviceId.c_str());
-
     _connection.configure(_mqttHost.c_str(), _mqttPort, _clientId.c_str(), _username.c_str(), _password.c_str(),
-                          _commandsTopic, _availabilityTopic);
+                          _topics.commandsFilter(), _topics.otaFilter(), _topics.availability(),
+                          &NivaloDevice::buildWill, this);
     _connection.client().setBufferSize(MqttPacketBufferSize);
     _connection.client().setCallback([this](char *topic, byte *payload, unsigned int length)
-                           { this->mqttCallback(topic, payload, length); });
-
+                                     { this->mqttCallback(topic, payload, length); });
+    _sessionReady = true;
     return true;
 }
 

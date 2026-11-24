@@ -1,175 +1,89 @@
 #include "NivaloDevice.h"
 
-#include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
+// PubSubClient hands over its own buffer and reuses it as soon as the callback returns. The
+// downlink is scanned, fingerprinted and copied here, inside the callback, and executed later
+// from loop(): the executor never runs inside PubSubClient and the PUBACK goes out at once.
 void NivaloDevice::mqttCallback(char *topic, byte *message, unsigned int length)
 {
-    Serial.print("Message arrived on topic: ");
-    Serial.println(topic);
-    DynamicJsonDocument doc(2048);
-    // PubSubClient owns and reuses `message`. Treat it as read-only so
-    // ArduinoJson copies strings into `doc`; otherwise status publishes made
-    // later in this callback can overwrite zero-copy command arguments.
-    const char *commandJson = reinterpret_cast<const char *>(message);
-    DeserializationError err = deserializeJson(doc, commandJson, length);
-    if (err)
+    if (_inboxFull)
     {
-        Serial.print("MQTT command JSON parse failed: ");
-        Serial.println(err.c_str());
-        queueEventReport("esp32.command.parse_error", err.c_str(), "warning");
+        // Not consumed: the gateway republishes a live operation every 30 s.
         return;
     }
+    if (nivaloParseDownlink(_topics, topic, message, length, &_inbox) == NIVALO_DOWNLINK_IDENTIFIED)
+    {
+        _inboxFull = true;
+    }
+}
 
-    String commandId = getCommandIdFromTopic(topic);
-    String commandName;
-    if (doc["payload"]["command"].is<const char *>())
+void NivaloDevice::processInbox()
+{
+    if (!_inboxFull)
     {
-        commandName = doc["payload"]["command"].as<String>();
+        return;
     }
-    else if (doc["command"].is<const char *>())
+    if (_executorBusyLoop)
     {
-        commandName = doc["command"].as<String>();
+        // Called while an operation is running (OTA download): the executor only answers
+        // duplicates from its journal or drops higher sequences; it starts nothing.
+        _executor.deliver(_inbox);
+        _inboxFull = false;
+        drainAcks();
+        return;
     }
-    String payload;
-    JsonVariant arguments = doc["payload"]["arguments"];
-    const char *requestedBy = doc["payload"]["requestedBy"].is<const char *>()
-                                  ? doc["payload"]["requestedBy"].as<const char *>()
-                                  : NULL;
-    if (requestedBy == NULL && doc["requestedBy"].is<const char *>())
-    {
-        requestedBy = doc["requestedBy"].as<const char *>();
-    }
-    if (arguments.is<const char *>())
-    {
-        payload = arguments.as<String>();
-    }
-    else if (arguments["url"].is<const char *>())
-    {
-        payload = arguments["url"].as<String>();
-    }
-    else if (arguments["signedUrl"].is<const char *>())
-    {
-        payload = arguments["signedUrl"].as<String>();
-    }
-    else if (arguments["downloadUrl"].is<const char *>())
-    {
-        payload = arguments["downloadUrl"].as<String>();
-    }
-    else if (!arguments.isNull())
-    {
-        serializeJson(arguments, payload);
-    }
-    else if (doc["payload"].is<const char *>())
-    {
-        payload = doc["payload"].as<String>();
-    }
+    // The executing operation must outlive the inbox slot, which refills during a download.
+    _working = _inbox;
+    _inboxFull = false;
+    _executorBusyLoop = true;
+    _executor.deliver(_working);
+    _executorBusyLoop = false;
+    drainAcks();
+}
 
-    Serial.println("-----------------------------");
-    Serial.println("MQTT command received");
-    Serial.print("command: ");
-    Serial.println(commandName);
-    if (commandId.length() > 0U)
+void NivaloDevice::serviceWhileBusy()
+{
+    if (_watchdogEnabled)
     {
-        Serial.print("commandId: ");
-        Serial.println(commandId);
+        esp_task_wdt_reset();
     }
-    if (arguments["target"].is<const char *>())
-    {
-        Serial.print("target: ");
-        Serial.println(arguments["target"].as<const char *>());
-    }
-    Serial.println("-----------------------------");
-    queueEventReport("esp32.command.received", commandName.c_str());
+    serviceConnection();
+    processInbox();
+    drainAcks();
+    serviceHeartbeat();
+}
 
-    if (commandId.length() > 0)
-    {
-        queueCommandAckReport(commandId.c_str(), "accepted", "Command received by ESP32");
-    }
-    drainQueuedReports();
-    _connection.client().loop();
+bool NivaloDevice::Platform::writeJournal(const NivaloJournal &journal)
+{
+    return _device._store.writeJournal(journal);
+}
 
-    if (commandName == "flash" || commandName == "firmware.flash")
-    {
-        handleFirmwareCommand(commandId, arguments);
-    }
-    else if (commandName.length() > 0 && dispatchSdkCommand(commandId.c_str(), commandName, payload))
-    {
-        // Locally registered handlers own their full terminal ACK lifecycle.
-    }
-    else if (commandName.length() > 0)
-    {
-#if NIVALO_HAS_SECONDARY_MCU
-        StaticJsonDocument<512> stmCommand;
-        stmCommand["commandId"] = commandId;
-        stmCommand["command"] = commandName;
-        if (requestedBy != NULL && strlen(requestedBy) > 0U)
-        {
-            stmCommand["requestedBy"] = requestedBy;
-        }
-        String forwardedCommand;
-        serializeJson(stmCommand, forwardedCommand);
-        if (forwardedCommand.endsWith("}"))
-        {
-            forwardedCommand.remove(forwardedCommand.length() - 1U);
-        }
-        forwardedCommand += ",\"payload\":";
-        if (!arguments.isNull())
-        {
-            // Serialize the source value straight into the final frame. Moving
-            // a nested value between ArduinoJson documents can preserve only
-            // an empty container on the ESP32 toolchain used by this bridge.
-            serializeJson(arguments, forwardedCommand);
-        }
-        else if (doc["payload"].is<const char *>())
-        {
-            serializeJson(doc["payload"], forwardedCommand);
-        }
-        else
-        {
-            forwardedCommand += "{}";
-        }
-        forwardedCommand += "}";
-        if (stmCommand.overflowed() || forwardedCommand.length() > NIVALO_LINK_MAX_PAYLOAD)
-        {
-            queueEventReport("mcu.command.forward_failed", "command JSON exceeds bridge capacity", "warning");
-            if (commandId.length() > 0)
-            {
-                queueCommandAckReport(commandId.c_str(), "failed", "Command JSON exceeds bridge capacity");
-            }
-            return;
-        }
-        NivaloLinkReceivedFrame immediateFrame;
-        bool sent = _link.transport().exchange(NIVALO_LINK_FRAME_COMMAND, forwardedCommand.c_str(), &immediateFrame);
+bool NivaloDevice::Platform::writePending(const NivaloPendingRecord &pending)
+{
+    return _device._store.writePending(pending);
+}
 
-        if (sent)
-        {
-            _link.noteCommandExchange(millis());
-            queueEventReport("mcu.command.forwarded", forwardedCommand.c_str());
-            if (commandId.length() > 0)
-            {
-                queueCommandAckReport(commandId.c_str(), "running", "Forwarded to secondary MCU over NivaloLink");
-            }
-            if (immediateFrame.valid)
-            {
-                handleNivaloLinkFrame(immediateFrame);
-            }
-        }
-        else
-        {
-            queueEventReport("mcu.command.forward_failed", _link.transport().lastError(), "warning");
-            if (commandId.length() > 0)
-            {
-                queueCommandAckReport(commandId.c_str(), "failed", _link.transport().lastError());
-            }
-        }
-#else
-        queueEventReport("esp32.command.unsupported", commandName.c_str(), "warning");
-        if (commandId.length() > 0)
-        {
-            queueCommandAckReport(commandId.c_str(), "failed", "No secondary MCU bridge is enabled");
-        }
-#endif
-    }
+bool NivaloDevice::Platform::clearPending()
+{
+    return _device._store.clearPending();
+}
 
-    Serial.println();
+bool NivaloDevice::Platform::writeFloor(uint32_t floor)
+{
+    return _device._store.writeFloor(_device._ota.productId, floor);
+}
+
+NivaloClockReading NivaloDevice::Platform::readClock()
+{
+    _device.pumpClock();
+    return _device._clock.read(_device.monotonicUs());
+}
+
+void NivaloDevice::Platform::publishAck(const NivaloAck &ack)
+{
+    if (!_device.publishAckNow(ack))
+    {
+        _device.queueAck(ack);
+    }
 }

@@ -4,52 +4,34 @@
 
 namespace
 {
-// Rich metadata for all eight standalone functions plus registered variables
-// needs more ArduinoJson arena space than the final serialized MQTT payload.
-static constexpr size_t DefinitionsJsonCapacity = 6144U;
-
-void addFirmwareTargets(JsonVariant firmware)
+// Hands each capability packet to a publish function of the device.
+class DefinitionsPublisher : public NivaloCatalogSink
 {
-    JsonArray targets = firmware["targets"].to<JsonArray>();
-    targets.add("esp32");
-#if NIVALO_HAS_SECONDARY_MCU
-    targets.add("stm32");
-#endif
-}
+public:
+    typedef bool (*Publish)(void *context, const char *payload, size_t length);
+    DefinitionsPublisher(Publish publish, void *context) : _publish(publish), _context(context) {}
+    bool emitPacket(const char *payload, size_t length) override { return _publish(_context, payload, length); }
+
+private:
+    Publish _publish;
+    void *_context;
+};
 } // namespace
 
 bool NivaloDevice::function(const char *name, NivaloFunctionHandler handler)
 {
-    bool registered = _sdkRegistry.addFunction(name, handler);
-    if (registered && _connection.connected() && _deviceId.length() > 0U)
-    {
-        publishDefinitions();
-    }
-    return registered;
+    return _sdkRegistry.addFunction(name, handler, NivaloFunctionMetadata());
 }
 
-bool NivaloDevice::function(
-    const char *name,
-    NivaloFunctionHandler handler,
-    const NivaloFunctionMetadata &metadata)
+bool NivaloDevice::function(const char *name, NivaloFunctionHandler handler, const NivaloFunctionMetadata &metadata)
 {
-    bool registered = _sdkRegistry.addFunction(name, handler, metadata);
-    if (registered && _connection.connected() && _deviceId.length() > 0U)
-    {
-        publishDefinitions();
-    }
-    return registered;
+    return _sdkRegistry.addFunction(name, handler, metadata);
 }
 
-#define NIVALO_VARIABLE_OVERLOAD(cppType, registryType)                                      \
-    bool NivaloDevice::variable(const char *name, cppType *reference, const char *unit)       \
-    {                                                                                         \
-        bool registered = _sdkRegistry.addVariable(name, reference, registryType, unit);      \
-        if (registered && _connection.connected() && _deviceId.length() > 0U)                  \
-        {                                                                                     \
-            publishDefinitions();                                                             \
-        }                                                                                     \
-        return registered;                                                                    \
+#define NIVALO_VARIABLE_OVERLOAD(cppType, registryType)                                 \
+    bool NivaloDevice::variable(const char *name, cppType *reference, const char *unit)  \
+    {                                                                                    \
+        return _sdkRegistry.addVariable(name, reference, registryType, unit);            \
     }
 
 NIVALO_VARIABLE_OVERLOAD(int, NIVALO_VARIABLE_INT)
@@ -63,202 +45,94 @@ NIVALO_VARIABLE_OVERLOAD(String, NIVALO_VARIABLE_STRING)
 
 #undef NIVALO_VARIABLE_OVERLOAD
 
-void NivaloDevice::onCommand(NivaloCommandHandler handler)
+void NivaloDevice::completeFunction(NivaloFunctionOutcome outcome)
 {
-    _sdkRegistry.setCommandHandler(handler);
+    _executor.completeFunction(outcome);
+    drainAcks();
 }
 
-void NivaloDevice::appendSdkDefinitions(JsonObject payload)
+bool NivaloDevice::sealCatalog()
 {
-    if (_sdkRegistry.variableCount() > 0U)
+    if (_sdkRegistry.sealed())
     {
-        JsonArray variables = payload["variables"].to<JsonArray>();
-        for (size_t i = 0; i < _sdkRegistry.variableCount(); i++)
-        {
-            const NivaloRegisteredVariable &registered = _sdkRegistry.variableAt(i);
-            JsonObject definition = variables.createNestedObject();
-            definition["name"] = registered.name;
-            definition["dataType"] = _sdkRegistry.variableDataType(i);
-            if (registered.unit.length() > 0U)
-            {
-                definition["unit"] = registered.unit;
-            }
-            definition["historyEnabled"] = true;
-            definition["sortOrder"] = (int)i;
-        }
+        return _catalogReady;
     }
-
-    if (_sdkRegistry.functionCount() > 0U)
+    NivaloCatalogState next;
+    const NivaloCatalogDecision decision = nivaloPlanCatalog(_sdkRegistry, _catalogReady ? &_catalog : NULL, &next);
+    if (decision == NIVALO_CATALOG_INVALID)
     {
-        JsonArray functions = payload["functions"].to<JsonArray>();
-        for (size_t i = 0; i < _sdkRegistry.functionCount(); i++)
-        {
-            const NivaloRegisteredFunction &registered = _sdkRegistry.functionAt(i);
-            JsonObject definition = functions.createNestedObject();
-            definition["name"] = registered.name;
-            if (registered.displayName.length() > 0U)
-            {
-                definition["displayName"] = registered.displayName;
-            }
-            if (registered.description.length() > 0U)
-            {
-                definition["description"] = registered.description;
-            }
-            if (registered.argumentExample.length() > 0U)
-            {
-                definition["argumentExample"] = registered.argumentExample;
-            }
-            if (registered.returnType.length() > 0U)
-            {
-                definition["returnType"] = registered.returnType;
-            }
-            definition["timeoutSeconds"] = registered.timeoutSeconds;
-            definition["dangerLevel"] = registered.dangerLevel;
-            definition["sortOrder"] = registered.sortOrder;
-        }
-    }
-}
-
-bool NivaloDevice::publishDefinitions()
-{
-    if (!_connection.connected() || _deviceId.length() == 0U ||
-        (_sdkRegistry.functionCount() == 0U && _sdkRegistry.variableCount() == 0U))
-    {
+        Serial.println("Nivalo: capability catalog cannot be reported (revision exhausted or too many entries)");
         return false;
     }
-
-    DynamicJsonDocument definitions(DefinitionsJsonCapacity);
-    definitions["schema"] = "nivalo.iot.v1";
-    definitions["messageId"] = createMessageId();
-    definitions["deviceId"] = _deviceId;
-    definitions["sentAt"] = createTimestamp();
-    definitions["firmware"]["version"] = _firmwareVersion;
-    definitions["firmware"]["hardware"] = _hardwareName;
-    addFirmwareTargets(definitions["firmware"]);
-    appendSdkDefinitions(definitions["payload"].to<JsonObject>());
-
-    String output;
-    serializeJson(definitions, output);
-    if (definitions.overflowed())
+    // A new revision is durable before any packet carries it.
+    if (decision == NIVALO_CATALOG_CHANGED && !_store.writeCatalog(next))
     {
-        queueEventReport("esp32.definitions.publish.failed", "local definitions exceed JSON capacity", "warning");
+        Serial.println("Nivalo: capability catalog revision could not be stored; retrying at the next connection");
         return false;
     }
-    bool published = _connection.publish(_definitionsTopic, output.c_str());
-    if (!published)
-    {
-        queueEventReport("esp32.definitions.publish.failed", "local definitions MQTT publish failed", "warning");
-    }
-    return published;
-}
-
-size_t NivaloDevice::publishVariables()
-{
-    if (!_connection.connected())
-    {
-        return 0U;
-    }
-    size_t published = 0U;
-    for (size_t i = 0; i < _sdkRegistry.variableCount(); i++)
-    {
-        String value;
-        if (_sdkRegistry.formatVariableValue(i, value))
-        {
-            const NivaloRegisteredVariable &registered = _sdkRegistry.variableAt(i);
-            published += publishTelemetry(
-                registered.name.c_str(),
-                value.c_str(),
-                registered.unit.length() > 0U ? registered.unit.c_str() : NULL);
-        }
-    }
-    return published;
-}
-
-bool NivaloDevice::dispatchSdkCommand(const char *commandId, const String &commandName, const String &arguments)
-{
-    const NivaloCompletedCommand *cached = _sdkCommandResults.find(commandId);
-    if (cached != NULL)
-    {
-        if (commandName == cached->commandName)
-        {
-            publishCommandAck(commandId, cached->status, cached->message);
-            publishEvent("esp32.command.duplicate", commandName.c_str(), "info");
-        }
-        else
-        {
-            publishCommandAck(commandId, "failed", "Command ID was already used for another command");
-            publishEvent("esp32.command.id_conflict", commandName.c_str(), "warning");
-        }
-        return true;
-    }
-
-    if (commandName == "requestDefinitions")
-    {
-        bool published = publishDefinitions();
-#if NIVALO_HAS_SECONDARY_MCU
-        // Publish local registrations now, then let the unmatched fallback ask
-        // the secondary MCU for its definitions as well.
-        (void)published;
-        return false;
-#else
-        if (commandId != NULL && commandId[0] != '\0')
-        {
-            const char *status = published ? "succeeded" : "failed";
-            const char *message = published ? "ESP32 definitions published" : "ESP32 definitions publish failed";
-            _sdkCommandResults.remember(commandId, commandName.c_str(), status, message);
-            publishCommandAck(
-                commandId,
-                status,
-                message);
-        }
-        return true;
-#endif
-    }
-
-    const NivaloRegisteredFunction *registeredFunction = _sdkRegistry.findFunction(commandName.c_str());
-    if (registeredFunction != NULL)
-    {
-        int result = registeredFunction->handler(arguments);
-        char ackMessage[96];
-        snprintf(ackMessage, sizeof(ackMessage), "Function %s returned %d", commandName.c_str(), result);
-        if (commandId != NULL && commandId[0] != '\0')
-        {
-            const char *status = result >= 0 ? "succeeded" : "failed";
-            _sdkCommandResults.remember(commandId, commandName.c_str(), status, ackMessage);
-            publishCommandAck(commandId, status, ackMessage);
-        }
-        publishEvent(
-            result >= 0 ? "esp32.function.succeeded" : "esp32.function.failed",
-            commandName.c_str(),
-            result >= 0 ? "info" : "warning");
-        return true;
-    }
-
-    NivaloCommandHandler handler = _sdkRegistry.commandHandler();
-    if (handler == NULL)
-    {
-        return false;
-    }
-    String message;
-    NivaloCommandResult result = handler(commandName, arguments, message);
-    if (result == NIVALO_COMMAND_UNHANDLED)
-    {
-        return false;
-    }
-    const bool succeeded = result == NIVALO_COMMAND_SUCCEEDED;
-    if (message.length() == 0U)
-    {
-        message = succeeded ? "Command handler completed" : "Command handler failed";
-    }
-    if (commandId != NULL && commandId[0] != '\0')
-    {
-        const char *status = succeeded ? "succeeded" : "failed";
-        _sdkCommandResults.remember(commandId, commandName.c_str(), status, message.c_str());
-        publishCommandAck(commandId, status, message.c_str());
-    }
-    publishEvent(
-        succeeded ? "esp32.command-handler.succeeded" : "esp32.command-handler.failed",
-        commandName.c_str(),
-        succeeded ? "info" : "warning");
+    _catalog = next;
+    _catalogReady = true;
+    _sdkRegistry.seal();
     return true;
+}
+
+void NivaloDevice::publishCatalog()
+{
+    if (!sealCatalog())
+    {
+        return;
+    }
+    DefinitionsPublisher publisher(
+        [](void *context, const char *payload, size_t length) -> bool {
+            NivaloDevice &device = *static_cast<NivaloDevice *>(context);
+            return device.publishEnvelope(device._topics.definitions(), payload, length, NULL, NULL, false);
+        },
+        this);
+    if (!nivaloRefreshCatalog(_sdkRegistry, _catalog, NivaloTelemetryBatch::PayloadCapacity, publisher))
+    {
+        Serial.println("Nivalo: capability refresh incomplete");
+    }
+}
+
+bool NivaloDevice::parseArguments(const char *argumentsJson, DynamicJsonDocument &document)
+{
+    return argumentsJson != NULL && deserializeJson(document, argumentsJson) == DeserializationError::Ok &&
+           document.is<JsonObject>();
+}
+
+bool NivaloDevice::Platform::hasFunction(const char *name)
+{
+    return _device._sdkRegistry.findFunction(name) != NULL;
+}
+
+bool NivaloDevice::Platform::validArguments(const char *name, const char *argumentsJson)
+{
+    const NivaloRegisteredFunction *function = _device._sdkRegistry.findFunction(name);
+    if (function == NULL)
+    {
+        return false;
+    }
+    DynamicJsonDocument arguments(JSON_OBJECT_SIZE(NivaloV11::MaxValues) + NivaloV11::MaxCommandBytes);
+    if (!_device.parseArguments(argumentsJson, arguments))
+    {
+        return false;
+    }
+    return function->validateArguments == NULL || function->validateArguments(arguments.as<JsonObjectConst>());
+}
+
+NivaloFunctionOutcome NivaloDevice::Platform::invokeFunction(const char *name, const char *argumentsJson)
+{
+    const NivaloRegisteredFunction *function = _device._sdkRegistry.findFunction(name);
+    DynamicJsonDocument arguments(JSON_OBJECT_SIZE(NivaloV11::MaxValues) + NivaloV11::MaxCommandBytes);
+    if (function == NULL || !_device.parseArguments(argumentsJson, arguments))
+    {
+        // The claim is durable already; nothing ran, so this is a known zero-effect failure.
+        return NIVALO_FUNCTION_FAILED;
+    }
+    return function->handler(arguments.as<JsonObjectConst>());
+}
+
+void NivaloDevice::Platform::refreshCatalog()
+{
+    _device.publishCatalog();
 }

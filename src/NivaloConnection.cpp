@@ -66,33 +66,51 @@ void NivaloConnection::usePlaintext() { _mqtt.setClient(_plainClient); }
 
 void NivaloConnection::configure(const char *host, uint16_t port, const char *clientId,
                                  const char *username, const char *password,
-                                 const char *commandsTopic, const char *availabilityTopic)
+                                 const char *commandsFilter, const char *otaFilter, const char *availabilityTopic,
+                                 NivaloWillBuilder willBuilder, void *willContext)
 {
     _host = host; _port = port; _clientId = clientId; _username = username; _password = password;
-    _commandsTopic = commandsTopic; _availabilityTopic = availabilityTopic;
+    _commandsFilter = commandsFilter; _otaFilter = otaFilter; _availabilityTopic = availabilityTopic;
+    _willBuilder = willBuilder; _willContext = willContext;
     _mqtt.setServer(_host.c_str(), _port);
+    _mqtt.setKeepAlive(60);
     _retryPolicy.reset();
 }
-
-void NivaloConnection::setLastWill(const String &payload) { _lastWill = payload; }
 
 void NivaloConnection::service(unsigned long now)
 {
     if (_mqtt.connected()) { _mqtt.loop(); return; }
     const uint32_t nowMs = static_cast<uint32_t>(now);
-    if (_lastWill.length() == 0U || !_retryPolicy.isAttemptDue(nowMs)) { return; }
-    bool ok = _mqtt.connect(_clientId.c_str(), _username.c_str(), _password.c_str(),
-                            _availabilityTopic.c_str(), 1, true, _lastWill.c_str());
-    if (ok)
+    if (_willBuilder == NULL || !_retryPolicy.isAttemptDue(nowMs)) { return; }
+    String will;
+    if (!_willBuilder(_willContext, will))
     {
-        _mqtt.subscribe(_commandsTopic.c_str());
-        _retryPolicy.onSuccess(nowMs); _justConnected = true;
+        _retryPolicy.onFailure(nowMs, esp_random());
+        return;
     }
-    else { _retryPolicy.onFailure(nowMs, esp_random()); }
+    const bool ok = _mqtt.connect(_clientId.c_str(), _username.c_str(), _password.c_str(),
+                                  _availabilityTopic.c_str(), 1, true, will.c_str(), true);
+    if (!ok)
+    {
+        _retryPolicy.onFailure(nowMs, esp_random());
+        return;
+    }
+    const bool commands = _mqtt.subscribe(_commandsFilter.c_str(), 1);
+    const bool ota = commands && _mqtt.subscribe(_otaFilter.c_str(), 1);
+    if (!ota)
+    {
+        // Without both subscriptions the device would announce a session it cannot serve.
+        _mqtt.disconnect();
+        _retryPolicy.onFailure(nowMs, esp_random());
+        return;
+    }
+    _retryPolicy.onSuccess(nowMs);
+    _justConnected = true;
 }
 
 bool NivaloConnection::connected() { return _mqtt.connected(); }
 bool NivaloConnection::publish(const char *topic, const char *payload, bool retained) { return _mqtt.connected() && _mqtt.publish(topic, payload, retained); }
+void NivaloConnection::disconnect() { if (_mqtt.connected()) { _mqtt.disconnect(); } }
 PubSubClient &NivaloConnection::client() { return _mqtt; }
 bool NivaloConnection::takeJustConnected() { bool value = _justConnected; _justConnected = false; return value; }
 unsigned long NivaloConnection::nextAttemptAt() const { return _retryPolicy.nextAttemptAt(); }

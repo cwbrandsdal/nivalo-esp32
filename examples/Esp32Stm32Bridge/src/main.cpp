@@ -12,8 +12,8 @@ namespace
 {
 NivaloDevice device;
 NivaloProvisioning provisioning;
+bool deviceStartAttempted = false;
 bool deviceStarted = false;
-String macAddress;
 
 #if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) && defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM)
 const NivaloFirmwareSigningKey firmwareSigningKeys[] = {
@@ -24,20 +24,8 @@ const NivaloFirmwareSigningKey firmwareSigningKeys[] = {
 };
 #endif
 
-String readMacAddress()
-{
-    uint8_t mac[6];
-    WiFi.macAddress(mac);
-    char text[13];
-    snprintf(text, sizeof(text), "%02x%02x%02x%02x%02x%02x",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    return String(text);
-}
-
 bool startDevice(const NivaloRuntimeCredentials &runtime)
 {
-    macAddress = readMacAddress();
-
     NivaloDeviceConfig config;
     config.mqtt.deviceId = runtime.deviceId.c_str();
     config.mqtt.clientId = runtime.mqttClientId.c_str();
@@ -47,24 +35,15 @@ bool startDevice(const NivaloRuntimeCredentials &runtime)
     config.mqtt.port = runtime.mqttPort;
     config.mqtt.firmwareVersion = NIVALO_IOT_FIRMWARE_VERSION;
     config.mqtt.hardwareName = NIVALO_IOT_HARDWARE_NAME;
-    config.mqtt.macAddress = macAddress;
     config.mqtt.transport = NIVALO_MQTT_TRANSPORT_TLS;
     config.mqtt.caCertificate = runtime.mqttCaCertificate.length() > 0U
                                     ? runtime.mqttCaCertificate.c_str()
                                     : NULL;
+    config.mqtt.apiOrigin = NIVALO_API_ORIGIN;
 
 #if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) && defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM)
     config.mqtt.firmwareSigningKeys = firmwareSigningKeys;
     config.mqtt.firmwareSigningKeyCount = sizeof(firmwareSigningKeys) / sizeof(firmwareSigningKeys[0]);
-#endif
-
-#if defined(NIVALO_STM32_PRESERVE_KNOWN_GOOD) && defined(NIVALO_STM32_KNOWN_GOOD_IMAGE_SIZE_BYTES)
-    config.mqtt.preserveKnownGoodStm32Image = NIVALO_STM32_PRESERVE_KNOWN_GOOD != 0;
-    config.mqtt.knownGoodStm32ImageSizeBytes = NIVALO_STM32_KNOWN_GOOD_IMAGE_SIZE_BYTES;
-#elif defined(NIVALO_STM32_GOLDEN_IMAGE_PATH) && defined(NIVALO_STM32_GOLDEN_IMAGE_SIZE_BYTES) && defined(NIVALO_STM32_GOLDEN_IMAGE_SHA256)
-    config.mqtt.stm32GoldenImagePath = NIVALO_STM32_GOLDEN_IMAGE_PATH;
-    config.mqtt.stm32GoldenImageSizeBytes = NIVALO_STM32_GOLDEN_IMAGE_SIZE_BYTES;
-    config.mqtt.stm32GoldenImageSha256 = NIVALO_STM32_GOLDEN_IMAGE_SHA256;
 #endif
 
     return device.begin(config);
@@ -103,8 +82,9 @@ void setup()
 void loop()
 {
     provisioning.loop();
-    if (provisioning.ready() && !deviceStarted)
+    if (provisioning.ready() && !deviceStartAttempted)
     {
+        deviceStartAttempted = true;
         deviceStarted = startDevice(provisioning.credentials());
     }
     if (deviceStarted)

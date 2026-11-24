@@ -10,6 +10,7 @@
 #include "NivaloCliProvisioningPolicy.h"
 #include "NivaloCliFrame.h"
 #include "NivaloCliTransaction.h"
+#include "NivaloDeviceStore.h"
 
 struct NivaloRuntimeCredentials
 {
@@ -102,6 +103,11 @@ private:
     void handleCliLine(char *line, size_t length);
     bool handleCliProvision(JsonObject root, const String &requestId);
     bool handleCliClaim(JsonObject root, const String &requestId);
+    bool handleCliSetupCode(JsonObject root);
+    // The per-unit setup code from the factory namespace, which no reset clears.
+    bool loadSetupCode(char code[17]);
+    // Protocol state (command journal, boot counter) for a newly committed identity.
+    bool prepareDeviceState(const String &deviceId, bool newlyClaimed);
     bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
     void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
     void sendCliClaimResponse(const String &requestId, bool ok);
@@ -124,6 +130,7 @@ private:
 
     NivaloProvisioningConfig _config;
     NivaloProvisioningStore _store;
+    NivaloDeviceStore _deviceState;
     NivaloRuntimeCredentials _credentials, _pending;
     NivaloPendingClaimAttempt _claimAttempt;
     NivaloProvisioningState _state = NIVALO_PROVISIONING_STARTING;

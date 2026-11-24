@@ -23,6 +23,12 @@
 #error "Browser provisioning artifacts cannot contain a local developer fixture."
 #endif
 
+// The environment (staging or production) is chosen by the PlatformIO environment, which sets
+// NIVALO_PRODUCT_ID, NIVALO_SECURITY_VERSION and NIVALO_API_ORIGIN (see platformio.ini).
+#ifndef NIVALO_API_ORIGIN
+#error "NIVALO_API_ORIGIN must be set by the build environment"
+#endif
+
 NivaloDevice device;
 NivaloProvisioning provisioning;
 #if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) && defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM)
@@ -33,31 +39,24 @@ static const NivaloFirmwareSigningKey firmwareSigningKeys[] = {
 #endif
 };
 #endif
-String macAddress;
 unsigned long lastTelemetryAt = 0;
+bool deviceStartAttempted = false;
 bool deviceStarted = false;
-int ledState = 0;
+bool ledState = false;
 
-static int setLed(String argument)
+// setLed {"state": true|false}
+static bool validSetLedArguments(JsonObjectConst arguments)
 {
-    argument.trim();
-    argument.toLowerCase();
-    if (argument == "on" || argument == "1" || argument == "true")
-    {
-        ledState = 1;
-    }
-    else if (argument == "off" || argument == "0" || argument == "false")
-    {
-        ledState = 0;
-    }
-    else
-    {
-        return -1;
-    }
+    return arguments.size() == 1U && arguments["state"].is<bool>();
+}
+
+static NivaloFunctionOutcome setLed(JsonObjectConst arguments)
+{
+    ledState = arguments["state"].as<bool>();
 #ifdef LED_BUILTIN
     digitalWrite(LED_BUILTIN, ledState ? HIGH : LOW);
 #endif
-    return ledState;
+    return NIVALO_FUNCTION_SUCCEEDED;
 }
 
 void setup()
@@ -72,7 +71,10 @@ void setup()
     NivaloFunctionMetadata setLedMetadata;
     setLedMetadata.displayName = "Set LED";
     setLedMetadata.description = "Turns the built-in LED on or off.";
-    setLedMetadata.argumentExample = "\"on\"";
+    setLedMetadata.argumentExample = "{\"state\":true}";
+    setLedMetadata.returnType = "void";
+    setLedMetadata.dangerLevel = "operational";
+    setLedMetadata.validateArguments = validSetLedArguments;
     if (!device.function("setLed", setLed, setLedMetadata) || !device.variable("ledState", &ledState))
     {
         Serial.println("SDK function/variable registration failed");
@@ -99,25 +101,34 @@ void setup()
 void loop()
 {
     provisioning.loop();
-    if (provisioning.ready() && !deviceStarted) {
-        const NivaloRuntimeCredentials &r=provisioning.credentials(); byte mac[6]; WiFi.macAddress(mac); char mt[13];
-        snprintf(mt,sizeof(mt),"%02x%02x%02x%02x%02x%02x",mac[0],mac[1],mac[2],mac[3],mac[4],mac[5]); macAddress=mt;
-        NivaloDeviceConfig c; c.mqtt.deviceId=r.deviceId.c_str(); c.mqtt.clientId=r.mqttClientId.c_str(); c.mqtt.username=r.mqttUsername.c_str();
-        c.mqtt.password=r.mqttPassword.c_str(); c.mqtt.host=r.mqttHost.c_str(); c.mqtt.port=r.mqttPort; c.mqtt.firmwareVersion=NIVALO_IOT_FIRMWARE_VERSION;
-        c.mqtt.hardwareName=NIVALO_EFFECTIVE_HARDWARE_NAME; c.mqtt.macAddress=macAddress; c.mqtt.transport=NIVALO_MQTT_TRANSPORT_TLS;
-        c.mqtt.caCertificate=r.mqttCaCertificate.length()?r.mqttCaCertificate.c_str():NULL;
+    if (provisioning.ready() && !deviceStartAttempted) {
+        deviceStartAttempted = true;
+        const NivaloRuntimeCredentials &r = provisioning.credentials();
+        NivaloDeviceConfig c;
+        c.mqtt.deviceId = r.deviceId.c_str(); c.mqtt.clientId = r.mqttClientId.c_str(); c.mqtt.username = r.mqttUsername.c_str();
+        c.mqtt.password = r.mqttPassword.c_str(); c.mqtt.host = r.mqttHost.c_str(); c.mqtt.port = r.mqttPort;
+        c.mqtt.firmwareVersion = NIVALO_IOT_FIRMWARE_VERSION; c.mqtt.hardwareName = NIVALO_EFFECTIVE_HARDWARE_NAME;
+        c.mqtt.transport = NIVALO_MQTT_TRANSPORT_TLS;
+        c.mqtt.caCertificate = r.mqttCaCertificate.length() ? r.mqttCaCertificate.c_str() : NULL;
+        c.mqtt.apiOrigin = NIVALO_API_ORIGIN;
 #if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) && defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM)
-        c.mqtt.firmwareSigningKeys=firmwareSigningKeys; c.mqtt.firmwareSigningKeyCount=sizeof(firmwareSigningKeys)/sizeof(firmwareSigningKeys[0]);
+        c.mqtt.firmwareSigningKeys = firmwareSigningKeys;
+        c.mqtt.firmwareSigningKeyCount = sizeof(firmwareSigningKeys) / sizeof(firmwareSigningKeys[0]);
 #endif
-        deviceStarted=device.begin(c);
+        deviceStarted = device.begin(c);
+        if (!deviceStarted)
+        {
+            Serial.println("Nivalo device could not start");
+        }
     }
     if (!deviceStarted) { delay(2); return; }
     device.loop();
 
-    if (millis() - lastTelemetryAt > 30000UL)
+    // Device health already travels in the free availability heartbeat; application readings
+    // are billed per 16, so report them at the cadence the application needs.
+    if (millis() - lastTelemetryAt > 300000UL)
     {
         lastTelemetryAt = millis();
-        device.publishRuntimeTelemetry();
         device.publishVariables();
     }
 }

@@ -4,41 +4,32 @@
 #include <NivaloDevice.h>
 #include <NivaloProvisioning.h>
 
+// Production API. Firmware updates additionally need NIVALO_PRODUCT_ID and
+// NIVALO_SECURITY_VERSION as build flags and a signing key; without them every OTA job is
+// rejected and the sketch still runs.
+static const char ApiOrigin[] = "https://iot-api.nivalo.io";
+
 NivaloDevice device;
 NivaloProvisioning provisioning;
 
 bool deviceStartAttempted = false;
 bool deviceStarted = false;
 unsigned long lastTelemetryAt = 0;
-int ledState = 0;
+bool ledState = false;
 
-int setLed(String argument)
+// setLed {"state": true|false}
+bool validSetLedArguments(JsonObjectConst arguments)
 {
-  argument.trim();
-  argument.toLowerCase();
+  return arguments.size() == 1U && arguments["state"].is<bool>();
+}
 
-  if (argument == "on" || argument == "1" || argument == "true") {
-    ledState = 1;
-  } else if (argument == "off" || argument == "0" || argument == "false") {
-    ledState = 0;
-  } else {
-    return -1;
-  }
-
+NivaloFunctionOutcome setLed(JsonObjectConst arguments)
+{
+  ledState = arguments["state"].as<bool>();
 #ifdef LED_BUILTIN
   digitalWrite(LED_BUILTIN, ledState ? HIGH : LOW);
 #endif
-  return ledState;
-}
-
-String deviceMacAddress()
-{
-  byte mac[6];
-  char text[13];
-  WiFi.macAddress(mac);
-  snprintf(text, sizeof(text), "%02x%02x%02x%02x%02x%02x",
-           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-  return String(text);
+  return NIVALO_FUNCTION_SUCCEEDED;
 }
 
 void setup()
@@ -49,14 +40,20 @@ void setup()
   pinMode(LED_BUILTIN, OUTPUT);
 #endif
 
-  if (!device.function("setLed", setLed) ||
+  NivaloFunctionMetadata setLedMetadata;
+  setLedMetadata.displayName = "Set LED";
+  setLedMetadata.argumentExample = "{\"state\":true}";
+  setLedMetadata.returnType = "void";
+  setLedMetadata.dangerLevel = "operational";
+  setLedMetadata.validateArguments = validSetLedArguments;
+  if (!device.function("setLed", setLed, setLedMetadata) ||
       !device.variable("ledState", &ledState)) {
     Serial.println("Nivalo SDK registration failed");
   }
 
-  // Defaults use the captive setup portal and certificate-validating claim
-  // flow. No Wi-Fi, device, MQTT, or firmware-signing secret is compiled in.
-  // Production remains fail-closed when flash/NVS encryption is unavailable.
+  // Defaults use the WPA2 setup portal (per-unit setup code provisioned over USB) and the
+  // certificate-validating claim flow. No Wi-Fi, device, MQTT, or firmware-signing secret is
+  // compiled in. Production remains fail-closed when flash/NVS encryption is unavailable.
   NivaloProvisioningConfig config;
   if (!provisioning.begin(config)) {
     Serial.println("Nivalo provisioning could not start");
@@ -78,15 +75,14 @@ void loop()
     config.mqtt.password = runtime.mqttPassword.c_str();
     config.mqtt.host = runtime.mqttHost.c_str();
     config.mqtt.port = runtime.mqttPort;
-    config.mqtt.firmwareVersion = "0.2.0-example";
+    config.mqtt.firmwareVersion = "0.3.0-example";
     config.mqtt.hardwareName = "esp32-arduino-example";
-    config.mqtt.macAddress = deviceMacAddress();
     config.mqtt.transport = NIVALO_MQTT_TRANSPORT_TLS;
     config.mqtt.caCertificate = runtime.mqttCaCertificate.length()
                                       ? runtime.mqttCaCertificate.c_str()
                                       : NULL;
+    config.mqtt.apiOrigin = ApiOrigin;
 
-    // An empty signing-key set intentionally leaves firmware updates disabled.
     deviceStarted = device.begin(config);
     if (!deviceStarted) {
       Serial.println("Nivalo device could not start");
@@ -99,9 +95,8 @@ void loop()
   }
 
   device.loop();
-  if (millis() - lastTelemetryAt >= 30000UL) {
+  if (millis() - lastTelemetryAt >= 300000UL) {
     lastTelemetryAt = millis();
-    device.publishRuntimeTelemetry();
     device.publishVariables();
   }
 }

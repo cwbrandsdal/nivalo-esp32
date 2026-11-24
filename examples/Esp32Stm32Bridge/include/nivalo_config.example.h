@@ -3,7 +3,8 @@
 // Copy this file to include/nivalo_config.h and fill in local values.
 // include/nivalo_config.h is ignored by git so MQTT passwords stay local.
 
-#define NIVALO_DEVICE_CLAIM_URL "https://iot-api.nivalo.io/v1/device-claims/exchange"
+#define NIVALO_API_ORIGIN "https://iot-api.nivalo.io"
+#define NIVALO_DEVICE_CLAIM_URL NIVALO_API_ORIGIN "/v1/device-claims/exchange"
 #define NIVALO_SETUP_BUTTON_PIN 0
 #define NIVALO_ALLOW_UNENCRYPTED_NVS_FOR_LOCAL_DEVELOPMENT 0
 #define NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE 0
@@ -32,12 +33,6 @@
 // #define NIVALO_FIRMWARE_PREVIOUS_KEY_ID "firmware-previous-key-id"
 // #define NIVALO_FIRMWARE_PREVIOUS_PUBLIC_KEY_PEM "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
 
-// STM32 writes are refused unless one recovery option is explicitly enabled.
-// Snapshot mode asserts the currently running image is known-good and requires
-// enough SPIFFS capacity for both the signed update and this exact image size.
-// #define NIVALO_STM32_PRESERVE_KNOWN_GOOD 1
-// #define NIVALO_STM32_KNOWN_GOOD_IMAGE_SIZE_BYTES 524288U
-// Or pre-provision and hash a golden image in durable SPIFFS storage:
-// #define NIVALO_STM32_GOLDEN_IMAGE_PATH "/stm32-golden.bin"
-// #define NIVALO_STM32_GOLDEN_IMAGE_SIZE_BYTES 524288U
-// #define NIVALO_STM32_GOLDEN_IMAGE_SHA256 "64-lowercase-hex-characters"
+// Protocol v1.1 does not advertise secondary-MCU execution or STM32 OTA yet; the bridge
+// forwards the MCU's telemetry and events only. Without NIVALO_PRODUCT_ID in the build flags
+// every ESP32 OTA job is rejected as well.

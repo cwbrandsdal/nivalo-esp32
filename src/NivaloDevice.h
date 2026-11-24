@@ -7,43 +7,45 @@
 #include "WProgram.h"
 #endif
 
-#include "NivaloLinkSpiTransport.h"
-#include "NivaloSdkRegistry.h"
-#include "NivaloConnection.h"
-#include "NivaloCommandResultCache.h"
-#include "NivaloProtocol.h"
-#include "NivaloLinkManager.h"
-#include "NivaloOta.h"
-#include "NivaloStatusPixel.h"
 #include <ArduinoJson.h>
+#include <esp_partition.h>
+
+#include "NivaloCatalog.h"
+#include "NivaloClock.h"
+#include "NivaloConnection.h"
+#include "NivaloDeviceStore.h"
+#include "NivaloDownlink.h"
+#include "NivaloExecutor.h"
+#include "NivaloLinkManager.h"
+#include "NivaloLinkSpiTransport.h"
+#include "NivaloOta.h"
+#include "NivaloOtaPolicy.h"
+#include "NivaloSdkRegistry.h"
+#include "NivaloStatusPixel.h"
+#include "NivaloUplink.h"
+#include "NivaloWire.h"
 
 #ifndef NIVALO_HAS_SECONDARY_MCU
 #define NIVALO_HAS_SECONDARY_MCU 0
 #endif
 
-// Compatibility publication ends after the protocol migration window on
-// 2027-01-31 UTC. Set to 0 once every consumer accepts the canonical topic.
-#ifndef NIVALO_PUBLISH_LEGACY_COMMAND_ACKS
-#define NIVALO_PUBLISH_LEGACY_COMMAND_ACKS 1
-#endif
-
 typedef enum
 {
-	NIVALO_STATUS_INVALID = -1,		   // -1
-	NIVALO_STATUS_SUCCESS = 0,		   // 0
-	NIVALO_STATUS_OUT_OF_MEMORY,	   // 1
-	NIVALO_STATUS_TIMEOUT,			   // 2
-	NIVALO_STATUS_UNEXPECTED_PARAM,	   // 3
-	NIVALO_STATUS_UNEXPECTED_RESPONSE, // 4
-	NIVALO_STATUS_NO_RESPONSE,		   // 5
-	NIVALO_STATUS_DEREGISTERED		   // 6
+	NIVALO_STATUS_INVALID = -1,
+	NIVALO_STATUS_SUCCESS = 0,
+	NIVALO_STATUS_OUT_OF_MEMORY,
+	NIVALO_STATUS_TIMEOUT,
+	NIVALO_STATUS_UNEXPECTED_PARAM,
+	NIVALO_STATUS_UNEXPECTED_RESPONSE,
+	NIVALO_STATUS_NO_RESPONSE,
+	NIVALO_STATUS_DEREGISTERED
 } nivalo_status_t;
 
 typedef enum
 {
-	NIVALO_STATUS_GREEN,	
-	NIVALO_STATUS_PULSE_BLUE,		  
-	NIVALO_STATUS_RED,	
+	NIVALO_STATUS_GREEN,
+	NIVALO_STATUS_PULSE_BLUE,
+	NIVALO_STATUS_RED,
 	NIVALO_STATUS_YELLOW
 } NivaloStatusColor;
 
@@ -61,38 +63,30 @@ struct NivaloMqttConfig
     const char *password = NULL;
     const char *host = NULL;
     uint16_t port = 8883;
+    // Firmware identity reported in every birth: text of 1-64 bytes each.
     const char *firmwareVersion = NULL;
     const char *hardwareName = NULL;
-    String macAddress;
     NivaloMqttTransport transport = NIVALO_MQTT_TRANSPORT_TLS;
     // NULL selects the library's built-in public CA bundle. A custom CA string
     // must remain valid for the lifetime of the MQTT connection.
     const char *caCertificate = NULL;
-    // Firmware signing keys are public material. Supply the active key and,
-    // during a rotation window, the immediately previous key. An empty trust
-    // set is intentionally fail-closed: every firmware flash is rejected.
-    const struct NivaloFirmwareSigningKey *firmwareSigningKeys = NULL;
+    // Firmware signing keys are public material, selected by keyId. Supply the active key and,
+    // during a rotation window, the immediately previous key. An empty trust set rejects every
+    // OTA job.
+    const NivaloFirmwareSigningKey *firmwareSigningKeys = NULL;
     size_t firmwareSigningKeyCount = 0;
-    // STM32 updates require either a known-good read-back snapshot or a
-    // pre-provisioned golden image. Both options are disabled by default.
-    bool preserveKnownGoodStm32Image = false;
-    size_t knownGoodStm32ImageSizeBytes = 0;
-    const char *stm32GoldenImagePath = NULL;
-    size_t stm32GoldenImageSizeBytes = 0;
-    const char *stm32GoldenImageSha256 = NULL;
+    // Origin of the Nivalo API, for example "https://iot-api.nivalo.io". OTA images are
+    // downloaded only from this origin; NULL rejects every OTA job.
+    const char *apiOrigin = NULL;
+    // CA for the API download; NULL selects the built-in public CA bundle.
+    const char *apiCaCertificate = NULL;
     const char *primaryNtpServer = "pool.ntp.org";
     const char *secondaryNtpServer = "time.cloudflare.com";
-    // Disable when the application already owns SNTP/timezone setup.
+    // Disable when the application already owns SNTP/timezone setup. Nivalo still observes
+    // every SNTP synchronisation to judge clock validity.
     bool configureClock = true;
+    // Telemetry messages kept in RAM while offline (0-8). Oldest dropped first.
     uint8_t telemetryBufferCapacity = 0;
-};
-
-struct NivaloFirmwareSigningKey
-{
-    const char *keyId;
-    // PEM SubjectPublicKeyInfo for an ECDSA P-256 key. The caller owns the
-    // storage and must keep it valid for the device lifetime.
-    const char *publicKeyPem;
 };
 
 struct NivaloPinMap
@@ -111,40 +105,42 @@ struct NivaloDeviceConfig
     uint16_t watchdogTimeoutSeconds = 30;
 };
 
-
 class NivaloDevice
 {
 public:
-    //  Constructor
     NivaloDevice();
 
     boolean begin(unsigned long baud = 115200);
     boolean begin(HardwareSerial &hardSerial, unsigned long baud = 115200);
     boolean begin(const NivaloDeviceConfig &config);
     boolean beginMqtt(const NivaloMqttConfig &config);
-    [[deprecated("Use begin(const NivaloDeviceConfig&) or beginMqtt(const NivaloMqttConfig&)")]] boolean beginMqtt(
-        const char *deviceId,
-        const char *clientId,
-        const char *username,
-        const char *password,
-        const char *host,
-        uint16_t port,
-        const char *firmwareVersion,
-        const char *hardwareName,
-        String macAddress);
     void setColor(NivaloStatusColor color);
 
-    size_t publish(const char *eventName, const char *eventData);
+    // --- Telemetry (batched; section 5) ---------------------------------------------------------
+    // One reading published at once. value is a decimal number or, otherwise, raw text.
     size_t publishTelemetry(const char *name, const char *value, const char *unit = NULL);
-    size_t publishRuntimeTelemetry();
+    // Adds a reading to the current sample of the pending batch (opened at the time of its first
+    // reading). nextTelemetrySample() closes the sample; flushTelemetry() publishes the batch.
+    // A full batch is published automatically.
+    bool addTelemetry(const char *name, double value, const char *unit = NULL);
+    bool addTelemetryRaw(const char *name, const char *raw, const char *unit = NULL);
+    void nextTelemetrySample();
+    size_t flushTelemetry();
+    // Every registered variable as one sample.
     size_t publishVariables();
-    bool publishDefinitions();
-    size_t publishUptimeTelemetry();
-    size_t publishWifiSignalTelemetry();
-    size_t publishHeapTelemetry();
-    size_t publishEvent(const char *name, const char *data, const char *severity = "info");
-    size_t publishAvailability(const char *status, const char *reason = NULL);
+    // uptime_ms, wifi_rssi and heap figures as one sample. Device health is also reported, free
+    // of charge, in every availability heartbeat.
+    size_t publishRuntimeTelemetry();
 
+    // --- Events and state (section 6) -----------------------------------------------------------
+    size_t publish(const char *eventName, const char *eventData);
+    // data that is strict JSON becomes the event's data, anything else its raw text.
+    size_t publishEvent(const char *name, const char *data, const char *severity = "info");
+    // valueJson is strict JSON (for example "true", "21.5", "\"auto\"" or "null").
+    size_t publishState(const char *name, const char *valueJson);
+
+    // --- Capabilities (section 12) --------------------------------------------------------------
+    // Register before the first connection; the catalog is sealed once it has been reported.
     bool function(const char *name, NivaloFunctionHandler handler);
     bool function(const char *name, NivaloFunctionHandler handler, const NivaloFunctionMetadata &metadata);
     bool variable(const char *name, int *reference, const char *unit = NULL);
@@ -155,11 +151,75 @@ public:
     bool variable(const char *name, double *reference, const char *unit = NULL);
     bool variable(const char *name, bool *reference, const char *unit = NULL);
     bool variable(const char *name, String *reference, const char *unit = NULL);
-    void onCommand(NivaloCommandHandler handler);
+    // Ends a handler that returned NIVALO_FUNCTION_PENDING.
+    void completeFunction(NivaloFunctionOutcome outcome);
+
+    // --- Session --------------------------------------------------------------------------------
+    // Publishes the retained graceful end and disconnects.
+    void shutdown();
+    bool clockValid() const;
+    // No downlink is accepted until the device is re-claimed (journal missing, corrupt or
+    // unwritable), or the boot counter is missing so no session can start.
+    bool needsReclaim() const;
 
     void loop();
 
 private:
+    class Platform : public NivaloExecutorPlatform
+    {
+    public:
+        explicit Platform(NivaloDevice &device) : _device(device) {}
+        bool writeJournal(const NivaloJournal &journal) override;
+        bool writePending(const NivaloPendingRecord &pending) override;
+        bool clearPending() override;
+        bool writeFloor(uint32_t floor) override;
+        NivaloClockReading readClock() override;
+        void publishAck(const NivaloAck &ack) override;
+        bool hasFunction(const char *name) override;
+        bool validArguments(const char *name, const char *argumentsJson) override;
+        NivaloFunctionOutcome invokeFunction(const char *name, const char *argumentsJson) override;
+        void refreshCatalog() override;
+        NivaloDownloadOutcome downloadImage(const NivaloOperation &operation) override;
+        NivaloActivationOutcome activateImage() override;
+        bool hashRunningSlot(uint32_t sizeBytes, char sha256Hex[65]) override;
+        void restart() override;
+
+    private:
+        NivaloDevice &_device;
+    };
+    friend class Platform;
+
+    static bool buildWill(void *context, String &will);
+    void mqttCallback(char *topic, byte *message, unsigned int length);
+    void serviceConnection();
+    void onConnected();
+    void serviceHeartbeat();
+    void serviceWhileBusy();
+    void processInbox();
+    void pumpClock();
+    int64_t monotonicUs() const;
+    bool nextMessageId(char output[37]);
+    bool publishEnvelope(const char *topic, const char *payload, size_t length, const char *correlationId,
+                         const NivaloFirmwareInfo *firmware, bool retained);
+    bool publishAckNow(const NivaloAck &ack);
+    void queueAck(const NivaloAck &ack);
+    void drainAcks();
+    bool publishBatch();
+    void bufferTelemetry(const char *envelope, size_t length);
+    void flushTelemetryBuffer();
+    bool openSample();
+    bool sealCatalog();
+    void publishCatalog();
+    NivaloDownloadOutcome downloadFirmware(const NivaloOperation &operation);
+    bool parseArguments(const char *argumentsJson, DynamicJsonDocument &document);
+    bool advanceConnection();
+
+    // UART bridge input (secondary MCU over UART).
+    void serviceUart();
+    void drainNivaloLink();
+    void handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame);
+    void publishNivaloLinkHeartbeat(const char *payload);
+
     String _deviceId;
     String _clientId;
     String _username;
@@ -167,78 +227,64 @@ private:
     String _mqttHost;
     String _firmwareVersion;
     String _hardwareName;
+    String _apiOrigin;
+    const char *_apiCaCertificate = NULL;
     uint16_t _mqttPort;
     NivaloMqttTransport _mqttTransport;
-    const NivaloFirmwareSigningKey *_firmwareSigningKeys;
-    size_t _firmwareSigningKeyCount;
-    bool _preserveKnownGoodStm32Image;
-    size_t _knownGoodStm32ImageSizeBytes;
-    String _stm32GoldenImagePath;
-    size_t _stm32GoldenImageSizeBytes;
-    String _stm32GoldenImageSha256;
+    NivaloFirmwareInfo _firmware;
+
+    NivaloTopics _topics;
+    NivaloClock _clock;
+    NivaloDeviceStore _store;
+    Platform _platform;
+    NivaloExecutor _executor;
+    NivaloOtaDevice _ota;
     NivaloSdkRegistry _sdkRegistry;
-    NivaloCommandResultCache _sdkCommandResults;
+    NivaloCatalogState _catalog;
+    bool _catalogReady = false;
     NivaloConnection _connection;
-    NivaloProtocol _protocol;
     NivaloLinkManager _link;
-    NivaloOtaManager _ota;
+    NivaloOtaManager _otaPins;
     NivaloStatusPixel _statusPixel;
     NivaloPinMap _pins;
-    unsigned long _lastHeartbeat = 0U;
-    bool _lastWillConfigured = false;
-    bool _watchdogEnabled = false;
+
+    // Session epoch (section 8.1).
+    bool _sessionReady = false;
+    NivaloEpoch _epoch;
+    uint32_t _heartbeatSeq = 0U;
+    int64_t _nextHeartbeatUs = 0;
+
+    // One downlink copied out of PubSubClient's buffer, handled on the next loop pass, and the
+    // copy the executor works on while the inbox refills.
+    NivaloOperation _inbox;
+    NivaloOperation _working;
+    bool _inboxFull = false;
+    bool _executorBusyLoop = false;
+
+    // ACKs waiting for a connection and a valid clock.
+    static constexpr size_t AckQueueCapacity = 6U;
+    NivaloAck _ackQueue[AckQueueCapacity];
+    size_t _ackQueueCount = 0U;
+
+    NivaloTelemetryBatch _batch;
+    bool _newSample = true;
+    uint32_t _droppedBatches = 0U;
     uint8_t _telemetryBufferCapacity = 0U;
-    struct BufferedTelemetry { String payload; } _telemetryBuffer[8];
+    String _telemetryBuffer[8];
     uint8_t _telemetryBufferHead = 0U;
     uint8_t _telemetryBufferCount = 0U;
-    struct PendingCommandAckState
-    {
-        bool queued = false;
-        char commandId[40];
-        char status[16];
-        char message[96];
-        float progress = -1;
-    } _pendingCommandAcks[8];
-    struct PendingEventState
-    {
-        bool queued = false;
-        char name[64];
-        char data[512];
-        char severity[16];
-    } _pendingEvents[8];
-    String _macAddr;
-    char _telemetryTopic[150];
-    char _stateTopic[150];
-    char _eventsTopic[150];
-    char _definitionsTopic[150];
-    char _availabilityTopic[150];
-    char _commandsTopic[150];
-    char _commandAckTopicPrefix[150];
-    char _legacyAckTopicPrefix[150];
+    char _envelope[NivaloV11::MaxUplinkBytes + 1U];
+    // Event and state payloads, built before the envelope around them.
+    char _payload[NivaloV11::MaxUplinkBytes];
 
+    // OTA: the inactive slot written by the current job, for the single activation call.
+    const esp_partition_t *_otaTarget = NULL;
+
+    bool _watchdogEnabled = false;
     HardwareSerial *_hardSerial;
-
     unsigned long _baud;
 
     nivalo_status_t init(unsigned long baud = 115200);
-
-    void mqttCallback(char *topic, byte *message, unsigned int length);
-    void handleFirmwareCommand(const String &commandId, JsonObject arguments);
-    void mqttReconnect();
-    void serviceConnection();
-    void flushTelemetryBuffer();
-    bool queueCommandAckReport(const char *commandId, const char *status, const char *message, float progress = -1);
-    bool queueEventReport(const char *name, const char *data, const char *severity = "info");
-    void drainQueuedReports();
-    void drainNivaloLink();
-    void handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame);
-    void publishNivaloLinkHeartbeat(const char *payload);
-    bool dispatchSdkCommand(const char *commandId, const String &commandName, const String &arguments);
-    void appendSdkDefinitions(JsonObject payload);
-    void publishCommandAck(const char *commandId, const char *status, const char *message = NULL, float progress = -1);
-    String getCommandIdFromTopic(const char *topic);
-    String createMessageId();
-    String createTimestamp();
 
     // UART Functions
     size_t hwPrint(const char *s);

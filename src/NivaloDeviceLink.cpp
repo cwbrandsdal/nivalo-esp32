@@ -6,21 +6,11 @@
 namespace
 {
 static constexpr size_t UartMessageJsonCapacity = 2048U;
-static constexpr size_t DefinitionsJsonCapacity = 3072U;
 static constexpr unsigned long HelloMs = 30000UL;
 static constexpr unsigned long HeartbeatMs = 30000UL;
 static constexpr unsigned long InvalidFrameReportMs = 60000UL;
 static constexpr unsigned long InvalidFrameBackoffMs = 250UL;
 static constexpr size_t DrainLimit = 8U;
-
-void addFirmwareTargets(JsonVariant firmware)
-{
-    JsonArray targets = firmware["targets"].to<JsonArray>();
-    targets.add("esp32");
-#if NIVALO_HAS_SECONDARY_MCU
-    targets.add("stm32");
-#endif
-}
 
 const char *wifiStatusName(int status)
 {
@@ -59,7 +49,6 @@ void NivaloDevice::publishNivaloLinkHeartbeat(const char *payload)
     esp32["uptimeMs"] = millis();
     esp32["firmwareVersion"] = _firmwareVersion;
     esp32["hardware"] = _hardwareName;
-    esp32["mac"] = _macAddr;
     esp32["sdkVersion"] = ESP.getSdkVersion();
     esp32["chipModel"] = ESP.getChipModel();
     esp32["chipRevision"] = ESP.getChipRevision();
@@ -189,103 +178,12 @@ void NivaloDevice::handleNivaloLinkFrame(const NivaloLinkReceivedFrame &frame)
         return;
     }
 
-    if (frame.type == NIVALO_LINK_FRAME_DEFINITION)
+    if (frame.type == NIVALO_LINK_FRAME_DEFINITION || frame.type == NIVALO_LINK_FRAME_DEFINITIONS_BEGIN ||
+        frame.type == NIVALO_LINK_FRAME_DEFINITIONS_END || frame.type == NIVALO_LINK_FRAME_COMMAND_STATUS)
     {
-        JsonVariant payload = doc.as<JsonVariant>();
-        if (!doc["payload"].isNull())
-        {
-            payload = doc["payload"];
-        }
-
-        JsonArray variables = payload["variables"].as<JsonArray>();
-        JsonArray functions = payload["functions"].as<JsonArray>();
-        size_t variableCount = variables.isNull() ? 0 : variables.size();
-        size_t functionCount = functions.isNull() ? 0 : functions.size();
-
-        DynamicJsonDocument definitions(DefinitionsJsonCapacity);
-        definitions["schema"] = "nivalo.iot.v1";
-        definitions["messageId"] = createMessageId();
-        definitions["deviceId"] = _deviceId;
-        definitions["sentAt"] = createTimestamp();
-        definitions["firmware"]["version"] = _firmwareVersion;
-        definitions["firmware"]["hardware"] = _hardwareName;
-        addFirmwareTargets(definitions["firmware"]);
-        JsonObject definitionsPayload = definitions["payload"].to<JsonObject>();
-        appendSdkDefinitions(definitionsPayload);
-        if (!variables.isNull())
-        {
-            JsonArray mergedVariables = definitionsPayload["variables"].as<JsonArray>();
-            if (mergedVariables.isNull())
-            {
-                mergedVariables = definitionsPayload["variables"].to<JsonArray>();
-            }
-            for (JsonVariant variable : variables)
-            {
-                mergedVariables.add(variable);
-            }
-        }
-        if (!functions.isNull())
-        {
-            JsonArray mergedFunctions = definitionsPayload["functions"].as<JsonArray>();
-            if (mergedFunctions.isNull())
-            {
-                mergedFunctions = definitionsPayload["functions"].to<JsonArray>();
-            }
-            for (JsonVariant function : functions)
-            {
-                mergedFunctions.add(function);
-            }
-        }
-
-        String definitionsOutput;
-        size_t definitionsBytes = serializeJson(definitions, definitionsOutput);
-        bool publishOk = false;
-        if (!definitions.overflowed())
-        {
-            publishOk = _connection.publish(_definitionsTopic, definitionsOutput.c_str());
-        }
-
-        char publishMessage[160];
-        snprintf(
-            publishMessage,
-            sizeof(publishMessage),
-            "variables=%u functions=%u bytes=%u overflow=%s mqtt=%s",
-            (unsigned int)variableCount,
-            (unsigned int)functionCount,
-            (unsigned int)definitionsBytes,
-            definitions.overflowed() ? "true" : "false",
-            publishOk ? "published" : "failed");
-        publishEvent(
-            publishOk ? "esp32.definitions.publish.ok" : "esp32.definitions.publish.failed",
-            publishMessage,
-            publishOk ? "info" : "warning");
-        return;
-    }
-
-    if (frame.type == NIVALO_LINK_FRAME_DEFINITIONS_BEGIN)
-    {
-        publishEvent("mcu.definitions.begin", frame.payloadLength > 0U ? frame.payload : "{}", "info");
-        return;
-    }
-
-    if (frame.type == NIVALO_LINK_FRAME_DEFINITIONS_END)
-    {
-        publishEvent("mcu.definitions.end", frame.payloadLength > 0U ? frame.payload : "{}", "info");
-        return;
-    }
-
-    if (frame.type == NIVALO_LINK_FRAME_COMMAND_STATUS)
-    {
-        const char *commandId = doc["commandId"] | "";
-        const char *status = doc["status"] | "failed";
-        const char *message = doc["message"].is<const char *>() ? doc["message"].as<const char *>() : NULL;
-        float progress = -1;
-        if (!doc["progress"].isNull())
-        {
-            progress = doc["progress"].as<float>();
-        }
-
-        publishCommandAck(commandId, status, message, progress);
+        // Protocol v1.1 does not advertise secondary-MCU capabilities or execution yet: the
+        // "mcu" catalog source and an MCU execution journal belong to the later bridge profile.
+        Serial.printf("NivaloLink frame 0x%02x is not reported in protocol v1.1\n", frame.type);
         return;
     }
 
@@ -363,7 +261,8 @@ void NivaloDevice::drainNivaloLink()
         _link.lastPoll = now;
         if (!sent)
         {
-            queueEventReport("esp32.nivalolink.poll_failed", _link.transport().lastError(), "warning");
+            Serial.print("NivaloLink poll failed: ");
+            Serial.println(_link.transport().lastError());
             return;
         }
 
@@ -394,7 +293,7 @@ void NivaloDevice::drainNivaloLink()
                 diagnostic["rxPrefix"] = rxPrefix;
                 serializeJson(diagnostic, diagnosticJson, sizeof(diagnosticJson));
 
-                if (queueEventReport("esp32.nivalolink.frame_invalid", diagnosticJson, "warning"))
+                if (publishEvent("esp32.nivalolink.frame_invalid", diagnosticJson, "warning") > 0U)
                 {
                     _link.lastInvalidFrameReport = reportNow;
                     _link.invalidFrameCount = 0;
