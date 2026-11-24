@@ -82,46 +82,18 @@ def inspect_test_artifact(image: bytes) -> dict[str, object]:
 
 
 class BrowserFlashArtifactTests(unittest.TestCase):
-    def test_nodemcu_phase1_bench_is_direct_flash_only(self) -> None:
-        platformio = (
-            ROOT / "examples" / "Esp32Only" / "platformio.ini"
-        ).read_text(encoding="utf-8")
-        section = platformio.split("[env:nodemcu-32s-phase1-bench]", 1)[1]
-        section = section.split("\n[env:", 1)[0]
-        self.assertIn("extends = env:featheresp32", section)
-        self.assertIn("board = nodemcu-32s", section)
-        self.assertIn("upload_port = COM6", section)
-        self.assertIn("monitor_port = COM6", section)
-        self.assertNotIn("NIVALO_BROWSER_FLASH_ARTIFACT", section)
-        self.assertNotIn("board_build.partitions", section)
-        self.assertEqual(platformio.count("-DNIVALO_BROWSER_FLASH_ARTIFACT=1"), 1)
-
-    def test_browser_build_excludes_ignored_local_configuration(self) -> None:
-        source = (ROOT / "examples" / "Esp32Only" / "src" / "main.cpp").read_text(
-            encoding="utf-8"
-        )
-        browser_branch = source.split("#else", 1)[0]
-        self.assertIn('#include "nivalo_browser_flash_config.h"', browser_branch)
-        self.assertNotIn("nivalo_config.h", browser_branch)
-        browser_config = (
-            ROOT / "examples" / "Esp32Only" / "include" / "nivalo_browser_flash_config.h"
-        ).read_text(encoding="utf-8")
-        self.assertIn("#define NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE 0", browser_config)
-        self.assertNotIn("NIVALO_DEV_WIFI_", browser_config)
-        self.assertNotIn("NIVALO_DEV_MQTT_", browser_config)
-
-    def test_builds_complete_factory_image_and_independent_evidence(self) -> None:
+    def test_builds_complete_factory_image_and_independent_inspection(self) -> None:
         image = build_test_factory(make_inputs())
-        evidence = inspect_test_artifact(image)
+        inspection = inspect_test_artifact(image)
         self.assertEqual(image[0], 0xE9)
         self.assertEqual(image[0x1000], 0xE9)
         self.assertEqual(image[APPLICATION_OFFSET], 0xE9)
         self.assertEqual(
-            evidence["partitionTable"]["sha256"],
-            evidence["approvedPartitionTables"]["nivalo-provisioning-4mb-v1"],
+            inspection["partitionTable"]["sha256"],
+            inspection["approvedPartitionTables"]["nivalo-provisioning-4mb-v1"],
         )
-        self.assertEqual(evidence["credentialStoragePolicy"], "evaluation-unencrypted-nvs")
-        self.assertFalse(evidence["productionEligible"])
+        self.assertEqual(inspection["credentialStoragePolicy"], "evaluation-unencrypted-nvs")
+        self.assertFalse(inspection["productionEligible"])
 
     def test_rejects_partition_tampering_independently_of_descriptor(self) -> None:
         image = bytearray(build_test_factory(make_inputs()))

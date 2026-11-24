@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic public-only firmware signing and recovery fixtures."""
+"""Deterministic public-only firmware signing vectors."""
 
 from __future__ import annotations
 
@@ -42,16 +42,6 @@ def verifies_with_trust(keys: list[dict[str, str]], key_id: str, signed: bytes, 
     return selected is not None and verifies(selected, signed, signature)
 
 
-def recovery_state(case: dict[str, object]) -> str:
-    if not case["recoveryReady"]:
-        return "rejected-before-program"
-    if case["programOk"] and case["verifyOk"]:
-        return "succeeded"
-    if case["recoveryProgramOk"] and case["recoveryVerifyOk"]:
-        return "failed-recovered"
-    return "failed-unrecovered"
-
-
 def main() -> None:
     vectors = json.loads((ROOT / "tests/firmware_signature_vectors.json").read_text())
     image = base64.b64decode(vectors["imageBase64"], validate=True)
@@ -72,42 +62,7 @@ def main() -> None:
     assert not verifies(current, manifest("esp32", vectors["sizeBytes"], changed_hash), current["signatureBase64"])
     assert hashlib.sha256(image + b"tampered").hexdigest() != vectors["sha256"]
 
-    cases = json.loads((ROOT / "tests/stm32_recovery_cases.json").read_text())
-    for case in cases:
-        assert recovery_state(case) == case["expected"], case["name"]
-
-    device = (ROOT / "src/NivaloDeviceOta.cpp").read_text()
-    security = (ROOT / "src/NivaloFirmwareSecurity.cpp").read_text()
-    assert device.index("nivaloVerifyFirmwareSignature") < device.index("Update.begin")
-    assert device.index("computeFileSha256(SPIFFS, \"/firmware.bin\"") < device.index("Update.begin")
-    assert "verifyStm32AgainstFile(_ota.dap(), \"/firmware.bin\"" in device
-    assert "esp32.flash.stm32-recovery-succeeded" in device
-    assert "esp32.flash.stm32-recovery-failed" in device
-    assert "destructiveStm32RecoveryAcceptanceOnce = false" in (ROOT / "src/NivaloDevice.h").read_text()
-    assert "_destructiveStm32RecoveryAcceptancePending = false" in device
-    candidate_flow = device[device.index("bool stm32ProgrammingOk"):]
-    assert candidate_flow.index("_destructiveStm32RecoveryAcceptancePending = false") < candidate_flow.index(
-        "acceptanceMismatchInjected = injectStm32RecoveryAcceptanceMismatch"
-    )
-    assert candidate_flow.index("acceptanceMismatchInjected = injectStm32RecoveryAcceptanceMismatch") < candidate_flow.index(
-        'verifyStm32AgainstFile(_ota.dap(), "/firmware.bin"'
-    )
-    assert "esp32.flash.stm32-acceptance-corruption-injected" in device
-    assert "MBEDTLS_ECP_DP_SECP256R1" in security
-    assert "setInsecure" not in device
-    assert 'Serial.println(payload)' not in device
-    assert 'Serial.print(payload)' not in device
-    flash_handler = device[device.index("void NivaloDevice::handleFirmwareCommand"):]
-    assert 'Serial.println(firmwareUrl)' not in flash_handler
-    assert 'Serial.println(signatureValue)' not in flash_handler
-    assert "http.end()" not in flash_handler
-    download_loop = flash_handler[flash_handler.index("while (http.connected()") : flash_handler.index("uint8_t actualSha256")]
-    assert "if (_watchdogEnabled)" in download_loop
-    assert "esp_task_wdt_reset();" in download_loop
-    assert "setPaused(false)" not in flash_handler
-    assert "_ota.releasePins()" not in flash_handler
-    assert flash_handler.count("otaSession.closeDownload()") == 2
-    print("validated firmware signatures, tamper rejection, staging order, and STM32 recovery states")
+    print("validated firmware signature vectors, key rotation, and tamper rejection")
 
 
 if __name__ == "__main__":

@@ -2,9 +2,6 @@
 
 ESP32 Arduino/PlatformIO library for Nivalo devices.
 
-The attended Phase-1 device acceptance procedure and evidence template are in
-[`docs/phase1-hardware-drill.md`](docs/phase1-hardware-drill.md).
-
 The explicit original-ESP32 browser-provisioning artifact build and its
 independent partition fingerprint procedure are documented in
 [`docs/browser-flash-artifact.md`](docs/browser-flash-artifact.md).
@@ -284,19 +281,6 @@ verification failure automatically restores the recovery image, verifies the
 restore, and reports whether recovery succeeded. If recovery is not configured
 or cannot be prepared, programming is refused.
 
-For an attended, destructive recovery drill on a dedicated non-production
-bench, an application may set
-`destructiveStm32RecoveryAcceptanceOnce = true`. This local-only option is
-disabled by default and is not read from MQTT command arguments. After the next
-STM32 candidate programs, it clears one programmed flash bit before the normal
-full read-back. The mismatch therefore enters the same automatic recovery path
-as a real verification failure. The option is consumed before injection so it
-cannot affect a second update during the same boot. Evidence must include the
-`esp32.flash.stm32-acceptance-corruption-injected`, recovery-started, and
-recovery-succeeded events plus an independent read-back of the restored image.
-Immediately reflash normal bridge firmware after the drill; never enable this
-option on production hardware.
-
 Storage capacity is a deployment constraint, not a compile-time assumption.
 ESP32 updates need free SPIFFS space at least equal to signed `sizeBytes`.
 Snapshot-based STM32 updates need the staged update plus the configured
@@ -322,10 +306,13 @@ pinned Espressif32 platform. ESP32 CI validates only this repository and the
 pinned protocol contracts. The examples repository owns its cross-repository
 builds against one immutable ESP32 commit, avoiding a circular CI dependency.
 
-CI runs for pull requests and for pushes to `main`; feature-branch pushes are
-not run separately from their pull requests. The Windows registry-portability
-lane is limited to changes that can affect the packaged device or maintained
-DAP archives. Manual dispatch remains a fail-safe full run.
+CI is one Linux job for pull requests and pushes to `main`: the host CTest
+suite, the signature, claim, schema and DAP provenance checks, the Python tooling
+tests, Arduino Lint (specification), and cached PlatformIO builds of the
+standalone and bridge examples (`featheresp32` environment of each). The
+browser-provisioning, NodeMCU and Arduino-sketch builds, the factory-image
+inspection and the clean-cache registry archive builds run in the
+`Registry release` workflow (see `docs/registry-release.md`).
 
 No remote or package has been created. Until publication, external bridge
 consumers must supply the fork explicitly rather than relying on registry

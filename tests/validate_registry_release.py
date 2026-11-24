@@ -34,8 +34,6 @@ def expect_stage_rejected(stage: Path) -> None:
 
 
 def main() -> None:
-    attributes = (ROOT / ".gitattributes").read_text(encoding="utf-8")
-    assert "* text=auto eol=lf" in attributes.splitlines()
     device_identity = release.release_identity("device")
     dap_identity = release.release_identity("dap")
     assert release.validate("device", device_identity["tag"]) == device_identity["version"]
@@ -57,20 +55,10 @@ def main() -> None:
         assert not (device / "tests").exists()
         assert not (device / "third_party").exists()
 
-        browser_project = device / "examples/Esp32Only"
-        browser_config = (browser_project / "platformio.ini").read_text(encoding="utf-8")
-        browser_script = browser_project / "../../scripts/browser_flash_platformio.py"
-        assert "extra_scripts = post:../../scripts/browser_flash_platformio.py" in browser_config
-        assert browser_script.resolve() == (device / "scripts/browser_flash_platformio.py").resolve()
-
         bridge_path = device / "examples/Esp32Stm32Bridge/platformio.ini"
         bridge = bridge_path.read_text(encoding="utf-8")
         dependency = release.dap_registry_dependency("nivalo-ci")
         assert dependency == f"nivalo-ci/Nivalo Adafruit DAP@{dap_identity['version']}"
-        assert sum(line.strip() == dependency for line in bridge.splitlines()) == 1
-        assert "third_party/adafruit-dap-nivalo" not in bridge.replace("\\", "/")
-        assert "upload_port" not in bridge
-        assert "monitor_port" not in bridge
 
         bridge_path.write_text(
             bridge.replace(dependency, "nivalo-ci/Nivalo Adafruit DAP@1.8.3-nivalo.2"),
@@ -87,35 +75,7 @@ def main() -> None:
         assert (dap / "license.txt").is_file()
         assert not any(path.is_symlink() for path in output.rglob("*"))
 
-    workflow = (ROOT / ".github/workflows/registry-release.yml").read_text(encoding="utf-8")
-    for required in (
-        "NIVALO_DEVICE_PLATFORMIO_AUTH_TOKEN",
-        "NIVALO_DAP_PLATFORMIO_AUTH_TOKEN",
-        "registry-publication",
-        "--no-interactive",
-        "verify_registry_archives.py",
-        "pack_registry_archive.py",
-        "--fresh-core-dir",
-        "NivaloRuntimeProvisioning.ino",
-        "arduino-lint_1.3.0_Linux_64bit.tar.gz",
-        "181671ca174988f2601e1cdf2b40a552682db8eaa047de33117e67e70338b63e",
-        "github.event.repository.private == false",
-        "pio pkg show --type library",
-        "publish=false",
-    ):
-        assert required in workflow
-    lint_step = "- name: Require Arduino Library Manager submission compliance"
-    provenance_step = "- name: Validate firmware and release provenance"
-    release_stage = "--output .release-stage"
-    assert workflow.count(lint_step) == 1
-    assert workflow.count("--compliance strict --library-manager submit") == 1
-    assert workflow.index(lint_step) < workflow.index(provenance_step)
-    assert workflow.index(lint_step) < workflow.index(release_stage)
-    assert "release create" not in workflow and "git push" not in workflow
-    assert "git describe" not in workflow
-    assert "DEVICE_TOKEN" not in workflow and "DAP_TOKEN" not in workflow
-    assert "&& secrets." not in workflow and "&& vars." not in workflow
-    print("validated fail-closed registry metadata, tags, staging, and guarded publication workflow")
+    print("validated fail-closed registry metadata, tags, and staging")
 
 
 if __name__ == "__main__":

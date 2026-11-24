@@ -1,16 +1,16 @@
 # Browser provisioning firmware artifact
 
 The `featheresp32-browser-provisioning` PlatformIO environment is the only
-firmware build in this repository labeled for the console's F11 browser
+firmware build in this repository labeled for the console's browser
 flasher. It targets an original Adafruit Feather ESP32 with an
 `ESP32-D0WDQ6` and exactly 4 MiB of JEDEC flash. A C3, S2, S3, another original
 ESP32 silicon variant, another carrier board, or another flash size requires a
 separate reviewed descriptor and artifact; do not broaden this build.
 
-The regular `featheresp32`, direct-flash `nodemcu-32s-phase1-bench`, and bridge
+The regular `featheresp32`, direct-flash `nodemcu-32s`, and bridge
 environments do not define `NIVALO_BROWSER_FLASH_ARTIFACT`, do not embed the
 descriptor, and remain application-only PlatformIO outputs. In particular,
-the NodeMCU bench build must never be offered through the browser-flash trust
+the NodeMCU build must never be offered through the browser-flash trust
 map as if it were the separately described Feather artifact.
 
 ## Evaluation storage policy
@@ -64,12 +64,14 @@ second-stage bootloader at `0x1000`. Inspection also requires every byte from
 `0x8c00` through `0xdfff` to remain erased, including the complete fresh-board
 NVS region beginning at `0x9000`; an artifact cannot preload credentials.
 
-The same build writes `nivalo-provisioning.merged.evidence.json`. The inspector
-does not trust the descriptor's self-asserted fingerprint: it hashes the exact
-inclusive `0x8000..0x8bff` bytes and emits the runtime configuration mapping an
-operator can independently review. Current reviewed source produces layout
-`nivalo-provisioning-4mb-v1`; changing the partition CSV without updating and
-reviewing the embedded fingerprint makes the post-build action fail closed.
+The inspector does not trust the descriptor's self-asserted fingerprint: it
+hashes the exact inclusive `0x8000..0x8bff` bytes and prints the approved
+partition-table mapping used in the console runtime configuration. The
+post-build action, `tests/validate_browser_flash_artifact.py` and the registry
+archive verifier all inspect the merged binary itself; no sidecar file is
+written. Current source produces layout `nivalo-provisioning-4mb-v1`; changing
+the partition CSV without updating the embedded fingerprint makes the
+post-build action fail closed.
 
 ## Release boundary
 
@@ -80,4 +82,4 @@ artifact exists and passes separate review, the guarded platform artifact
 pipeline must sign its exact merged bytes server-side with its configured
 firmware-signing private key. Only the corresponding SPKI public key belongs in
 console runtime configuration. Never place a signing private key in this
-repository, PlatformIO flags, the firmware, or generated evidence.
+repository, PlatformIO flags, the firmware, or build output.
