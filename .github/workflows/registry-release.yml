@@ -122,6 +122,11 @@ jobs:
           echo "181671ca174988f2601e1cdf2b40a552682db8eaa047de33117e67e70338b63e  $lint_dir/arduino-lint.tar.gz" | sha256sum --check --strict
           tar -xzf "$lint_dir/arduino-lint.tar.gz" -C "$lint_dir" arduino-lint
           "$lint_dir/arduino-lint" --compliance strict --library-manager submit --project-type library --recursive=false
+      - name: Host behavior tests
+        run: |
+          cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/host --parallel
+          ctest --test-dir build/host --output-on-failure
       - name: Validate firmware and release provenance
         env:
           RELEASE_PACKAGE: ${{ steps.release.outputs.package }}
