@@ -226,7 +226,10 @@ int descriptorCases()
         context() = std::string("descriptor hidden at candidate byte ") + std::to_string(offset);
         std::vector<uint8_t> overlapping = image;
         std::vector<uint8_t> hidden(descriptor, descriptor + 16U);
-        hidden.resize(offset, 0x20U);
+        while (hidden.size() < offset)
+        {
+            hidden.push_back(0x20U);
+        }
         hidden.insert(hidden.end(), descriptor, descriptor + NivaloImageDescriptorBytes);
         overlapping.insert(overlapping.begin() + 10000, hidden.begin(), hidden.end());
         NivaloImageDescriptorScanner scanner;
