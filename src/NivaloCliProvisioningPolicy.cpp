@@ -115,4 +115,12 @@ bool isTlsPort(uint16_t port)
 {
     return port == 8883U || port == 8884U;
 }
+bool isSetupCode(const char *value, size_t length)
+{
+    static const char Alphabet[] = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    if (value == NULL || length != 16U) return false;
+    for (size_t index = 0U; index < length; ++index)
+        if (value[index] == '\0' || strchr(Alphabet, value[index]) == NULL) return false;
+    return true;
+}
 } // namespace NivaloCliProvisioningPolicy

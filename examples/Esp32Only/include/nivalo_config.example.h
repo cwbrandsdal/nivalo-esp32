@@ -1,8 +1,8 @@
 #pragma once
 
-#define NIVALO_DEVICE_CLAIM_URL "https://iot-api.nivalo.io/v1/device-claims/exchange"
+// NIVALO_API_ORIGIN comes from the PlatformIO environment (staging or production).
+#define NIVALO_DEVICE_CLAIM_URL NIVALO_API_ORIGIN "/v1/device-claims/exchange"
 #define NIVALO_SETUP_BUTTON_PIN 0
-#define NIVALO_ALLOW_UNENCRYPTED_NVS_FOR_LOCAL_DEVELOPMENT 0
 #define NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE 0
 
 // Local development only: use NIVALO_MQTT_TRANSPORT_PLAINTEXT_LOCAL with a
@@ -20,13 +20,9 @@
 #define NIVALO_DEV_MQTT_PASSWORD "replace-local-fixture-password"
 #endif
 
-#define NIVALO_IOT_FIRMWARE_VERSION "0.1.0"
+#define NIVALO_IOT_FIRMWARE_VERSION "0.3.0"
 #define NIVALO_IOT_HARDWARE_NAME "esp32-standalone"
 
-// Firmware trust is fail-closed. Define the current public key and optionally
-// the previous rotation key in ignored nivalo_config.h. Never provision a
-// private signing key on the device.
-// #define NIVALO_FIRMWARE_CURRENT_KEY_ID "firmware-current-key-id"
-// #define NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
-// #define NIVALO_FIRMWARE_PREVIOUS_KEY_ID "firmware-previous-key-id"
-// #define NIVALO_FIRMWARE_PREVIOUS_PUBLIC_KEY_PEM "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+// Firmware trust anchors (public keys) are tracked per environment in
+// nivalo_firmware_trust.h, not here. Plain NVS is allowed by the build
+// environment (NIVALO_ALLOW_PLAINTEXT_NVS in platformio.ini).

@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  NIVALO_PROTOCOL_REF: cb25ab0997c02bc7c16f757e685ef209bac22d34
+  NIVALO_PROTOCOL_REF: 5530ea195ae97f5d3ea9e7a24509206ed80cea86
   NIVALO_PROTOCOL_DIR: ${{ github.workspace }}/.ci/nivalo-protocol
 
 concurrency:
@@ -42,17 +42,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Python tools
-        run: python -m pip install --disable-pip-version-check platformio==6.1.19 cryptography==46.0.7 jsonschema==4.25.1
+        run: python -m pip install --disable-pip-version-check platformio==6.1.19 cryptography==46.0.7 jsonschema==4.25.1 rfc3339-validator==0.1.4
       - name: Host behavior tests
         run: |
-          cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release
+          cmake -S tests/host -B build/host -DCMAKE_BUILD_TYPE=Release -DNIVALO_PROTOCOL_DIR="$NIVALO_PROTOCOL_DIR"
           cmake --build build/host --parallel
           ctest --test-dir build/host --output-on-failure
-      - name: Signature, claim, schema and provenance checks
+      - name: Claim and provenance checks
         run: |
-          python tests/validate_firmware_security.py
           python tests/validate_provisioning.py
-          python tests/validate_sdk_extensibility.py
           python tests/validate_cli_serial.py
           python tests/validate_serial_claim_contract.py
           python tests/validate_dap_fork.py
@@ -76,7 +74,7 @@ jobs:
           key: platformio-6.1.19-${{ runner.os }}-${{ hashFiles('examples/*/platformio.ini') }}
           restore-keys: |
             platformio-6.1.19-${{ runner.os }}-
-      - name: Build standalone example
-        run: pio run --project-dir examples/Esp32Only --environment featheresp32
+      - name: Build standalone example (staging and production)
+        run: pio run --project-dir examples/Esp32Only --environment featheresp32 --environment featheresp32-production
       - name: Build ESP32-STM32 bridge example
         run: pio run --project-dir examples/Esp32Stm32Bridge --environment featheresp32

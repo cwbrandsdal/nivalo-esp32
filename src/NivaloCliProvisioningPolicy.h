@@ -15,6 +15,9 @@ bool isWifiSsid(const char *value, size_t length);
 bool isWifiPassword(const char *value, size_t length);
 bool isHardwareId(const char *value, size_t length);
 bool isClaimCode(const char *value, size_t length);
+// Per-unit setup code: 16 uppercase Crockford Base32 characters (80 bits), the WPA2 passphrase
+// of the setup access point.
+bool isSetupCode(const char *value, size_t length);
 bool isMqttHost(const char *value, size_t length);
 bool isMqttIdentity(const char *value, size_t length);
 bool isMqttPassword(const char *value, size_t length);

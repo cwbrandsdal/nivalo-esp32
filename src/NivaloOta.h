@@ -27,11 +27,8 @@ public:
     NivaloStm32Dap &dap() { return _dap; }
 #endif
     const NivaloOtaPinMap &pins() const { return _pins; }
-    uint8_t *buffer() { return _buffer; }
-    size_t bufferSize() const { return sizeof(_buffer); }
 private:
     NivaloOtaPinMap _pins;
-    uint8_t _buffer[16U * 1024U] __attribute__((aligned(4)));
 #if NIVALO_HAS_SECONDARY_MCU
     NivaloStm32Dap _dap;
 #endif

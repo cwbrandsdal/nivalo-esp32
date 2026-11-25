@@ -97,8 +97,9 @@ URL. PlatformIO validation and publication do not require that visibility
 change.
 
 The `Registry release` workflow can also be dispatched with `publish=false` and
-an existing `refs/tags/...` ref. It reruns the signature, claim, schema and
-provenance checks, the repository example builds, staging, packing, archive
+an existing `refs/tags/...` ref. It reruns the host protocol tests (against the
+pinned `nivalo-protocol` fixtures), the claim and provenance checks, the
+repository example builds, staging, packing, archive
 inspection, and checksum generation without contacting a registry.
 
 The repository packer writes a byte-reproducible archive: members are sorted,
