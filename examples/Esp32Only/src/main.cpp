@@ -55,6 +55,23 @@ static_assert(sizeof(NIVALO_FIRMWARE_PREVIOUS_KEY_ID) > 1U && !nivaloTestKeyId(N
 #ifndef NIVALO_API_ORIGIN
 #error "NIVALO_API_ORIGIN must be set by the build environment"
 #endif
+#ifndef NIVALO_DEVICE_CLAIM_URL
+#define NIVALO_DEVICE_CLAIM_URL NIVALO_API_ORIGIN "/v1/device-claims/exchange"
+#endif
+
+namespace
+{
+constexpr bool startsWith(const char *text, const char *prefix)
+{
+    return *prefix == '\0' || (*text == *prefix && startsWith(text + 1, prefix + 1));
+}
+} // namespace
+
+// An older local nivalo_config.h can hard-code another environment's claim URL. That would send this
+// build's claim codes to the wrong platform, so refuse to build instead.
+static_assert(startsWith(NIVALO_DEVICE_CLAIM_URL, NIVALO_API_ORIGIN "/"),
+              "NIVALO_DEVICE_CLAIM_URL must start with this environment's NIVALO_API_ORIGIN: "
+              "update or remove the claim URL in include/nivalo_config.h");
 
 NivaloDevice device;
 NivaloProvisioning provisioning;
