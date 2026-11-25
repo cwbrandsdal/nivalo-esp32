@@ -1,8 +1,8 @@
-// Durable protocol state through the real NivaloDeviceStore (on a map-backed Preferences): what a
-// credential change may do to the journal and the boot counter (section 15), and how unreadable
+// Durable protocol state through the real NivaloDeviceStore (on a map-backed native NVS API): what
+// a credential change may do to the journal and the boot counter (section 15), and how unreadable
 // records read (OTA floor, catalog). The executor is booted from the store as the device does.
 
-#include <Preferences.h>
+#include <nvs.h>
 
 #include "NivaloArguments.h"
 #include "NivaloDeviceStore.h"
@@ -35,6 +35,8 @@ public:
     bool writePending(const NivaloPendingRecord &pending) override { return _store.writePending(pending); }
     bool clearPending() override { return _store.clearPending(); }
     bool writeFloor(uint32_t floor) override { return _store.writeFloor(ProductId, floor); }
+    NivaloStoreRead readPending(NivaloPendingRecord *pending) override { return _store.loadPending(pending); }
+    NivaloStoreRead readFloor(uint32_t *floor) override { return _store.loadFloor(ProductId, floor); }
     NivaloClockReading readClock() override
     {
         NivaloClockReading reading;
@@ -49,11 +51,13 @@ public:
     {
         return _arguments.prepare(operation.arguments, operation.argumentsLength);
     }
-    NivaloFunctionOutcome invokePrepared(uint32_t) override
+    bool armPrepared(uint32_t) override { return _arguments.ready(); }
+    NivaloFunctionOutcome invokePrepared() override
     {
         handlerCalls++;
         return NIVALO_FUNCTION_SUCCEEDED;
     }
+    void disarmPrepared() override {}
     void releasePrepared() override { _arguments.release(); }
     NivaloRefreshOutcome refreshCatalog() override { return NIVALO_REFRESH_COMPLETE; }
     NivaloDownloadOutcome downloadImage(const NivaloOperation &, uint32_t) override { return NIVALO_DOWNLOAD_REJECTED; }
@@ -100,7 +104,7 @@ bool boot(NivaloDeviceStore &store, StorePlatform &platform, NivaloExecutor &exe
     const bool bootReadable = store.loadBoot(&counter) == NIVALO_STORE_OK;
     static NivaloOtaDevice ota;
     static NivaloImageIdentity image;
-    executor.begin(deviceId, read == NIVALO_STORE_OK ? &journal : NULL, NULL, &ota, image);
+    executor.begin(deviceId, read == NIVALO_STORE_OK ? &journal : NULL, &ota, image);
     platform.acks.clear();
     platform.handlerCalls = 0;
     return bootReadable;
@@ -123,8 +127,18 @@ int identityCases()
     NivaloDeviceStore store;
     StorePlatform platform(store);
 
-    context() = "first enrollment initializes the protocol state";
-    V11_CHECK(store.admitIdentity(DeviceId, false) == NIVALO_IDENTITY_FIRST_ENROLLMENT, "admission");
+    context() = "B1: USB credentials on a unit without protocol state are refused, writing nothing";
+    {
+        // A replacement board with empty NVS cannot show that a supplied, previously used device ID
+        // never executed anything; only a claim (or the developer fixture) starts fresh state.
+        const size_t before = protocolWrites();
+        V11_CHECK(store.admitManualCredentials(DeviceId) == NIVALO_IDENTITY_REFUSED, "an empty unit admitted");
+        V11_CHECK(protocolWrites() == before && !store.identityReady(DeviceId), "protocol state written");
+    }
+    checked++;
+
+    context() = "the developer fixture (or a claim) initializes the protocol state";
+    V11_CHECK(store.admitDeveloperFixture(DeviceId) == NIVALO_IDENTITY_FIRST_ENROLLMENT, "admission");
     V11_CHECK(store.initializeIdentity(DeviceId) && store.identityReady(DeviceId), "initialized");
     checked++;
 
@@ -143,7 +157,7 @@ int identityCases()
     context() = "a same-ID credential update keeps the high-water mark and the boot counter";
     {
         const size_t before = protocolWrites();
-        V11_CHECK(store.admitIdentity(DeviceId, true) == NIVALO_IDENTITY_KEEP, "same device ID is kept");
+        V11_CHECK(store.admitManualCredentials(DeviceId) == NIVALO_IDENTITY_KEEP, "same device ID is kept");
         V11_CHECK(protocolWrites() == before, "the admission wrote protocol state");
         NivaloExecutor executor(platform);
         V11_CHECK(boot(store, platform, executor, DeviceId), "boot counter readable");
@@ -160,7 +174,8 @@ int identityCases()
         const FakeNvs::Entry journal = nvs().entries["nivalo-dev/journal"];
         nvs().entries.erase("nivalo-dev/journal");
         const size_t before = protocolWrites();
-        V11_CHECK(store.admitIdentity(DeviceId, true) == NIVALO_IDENTITY_REFUSED, "credentials admitted");
+        V11_CHECK(store.admitManualCredentials(DeviceId) == NIVALO_IDENTITY_REFUSED, "credentials admitted");
+        V11_CHECK(store.admitDeveloperFixture(DeviceId) == NIVALO_IDENTITY_REFUSED, "fixture admitted");
         V11_CHECK(protocolWrites() == before && nvs().entries.count("nivalo-dev/journal") == 0U, "journal reseeded");
         NivaloExecutor executor(platform);
         boot(store, platform, executor, DeviceId);
@@ -174,20 +189,28 @@ int identityCases()
     context() = "an unreadable journal or boot counter is not reseeded either";
     {
         nvs().unreadable.insert("nivalo-dev/journal");
-        V11_CHECK(store.admitIdentity(DeviceId, true) == NIVALO_IDENTITY_REFUSED, "unreadable journal admitted");
+        V11_CHECK(store.admitManualCredentials(DeviceId) == NIVALO_IDENTITY_REFUSED, "unreadable journal admitted");
         nvs().unreadable.clear();
+        nvs().lookupErrors["nivalo-dev/journal"] = ESP_FAIL;
+        nvs().lookupErrors["nivalo-dev/boot"] = ESP_FAIL;
+        V11_CHECK(store.admitDeveloperFixture(DeviceId) == NIVALO_IDENTITY_REFUSED,
+                  "failed lookups taken as a unit without protocol state");
+        const size_t beforeInitialization = protocolWrites();
+        V11_CHECK(!store.initializeIdentity(DeviceId) && protocolWrites() == beforeInitialization,
+                  "initialization wrote over records that did not read");
+        nvs().lookupErrors.clear();
         const FakeNvs::Entry bootEntry = nvs().entries["nivalo-dev/boot"];
         nvs().entries.erase("nivalo-dev/boot");
         const size_t before = protocolWrites();
-        V11_CHECK(store.admitIdentity(DeviceId, true) == NIVALO_IDENTITY_REFUSED, "missing boot counter admitted");
+        V11_CHECK(store.admitManualCredentials(DeviceId) == NIVALO_IDENTITY_REFUSED, "missing boot counter admitted");
         V11_CHECK(protocolWrites() == before && nvs().entries.count("nivalo-dev/boot") == 0U, "boot counter reseeded");
         nvs().entries["nivalo-dev/boot"] = bootEntry;
     }
     checked++;
 
     context() = "manual credentials of another device ID never take over the history";
-    V11_CHECK(store.admitIdentity(OtherDeviceId, true) == NIVALO_IDENTITY_REFUSED, "switch with credentials");
-    V11_CHECK(store.admitIdentity(OtherDeviceId, false) == NIVALO_IDENTITY_REFUSED, "switch after a factory reset");
+    V11_CHECK(store.admitManualCredentials(OtherDeviceId) == NIVALO_IDENTITY_REFUSED, "USB switch");
+    V11_CHECK(store.admitDeveloperFixture(OtherDeviceId) == NIVALO_IDENTITY_REFUSED, "fixture switch");
     checked++;
 
     context() = "a claim of a new device ID starts its journal and keeps the boot counter";
@@ -236,8 +259,52 @@ int floorCases()
     V11_CHECK(protocolWrites() == before && nvs().entries["nivalo-dev/otaFloor"].bytes == damaged, "record changed");
     nvs().entries["nivalo-dev/otaFloor"].bytes = intact;
     nvs().unreadable.insert("nivalo-dev/otaFloor");
-    V11_CHECK(store.loadFloor(ProductId, &floor) == NIVALO_STORE_CORRUPT, "failed read taken as no floor");
+    V11_CHECK(store.loadFloor(ProductId, &floor) == NIVALO_STORE_UNREADABLE, "failed read taken as no floor");
     nvs().unreadable.clear();
+    checked++;
+
+    context() = "H4: only \"not found\" is a missing record; a failed lookup is unreadable";
+    {
+        // A committed floor of 9 whose lookup fails (Preferences::isKey() reported this as an
+        // absent key): it must not read as "no floor", or a running version 5 would accept 7.
+        const esp_err_t errors[] = {ESP_FAIL, ESP_ERR_NVS_INVALID_HANDLE, ESP_ERR_NVS_NOT_INITIALIZED};
+        for (const esp_err_t error : errors)
+        {
+            nvs().lookupErrors["nivalo-dev/otaFloor"] = error;
+            V11_CHECK(store.loadFloor(ProductId, &floor) == NIVALO_STORE_UNREADABLE, "floor lookup error " << error);
+        }
+        NivaloDeviceStore bootStore;
+        StorePlatform platform(bootStore);
+        NivaloExecutor executor(platform);
+        NivaloOtaDevice ota;
+        ota.runningSecurityVersion = 5U;
+        NivaloImageIdentity image;
+        V11_CHECK(bootStore.begin(), "store");
+        executor.begin(DeviceId, NULL, &ota, image);
+        V11_CHECK(!ota.floorReadable, "an unreadable floor left OTA enabled");
+        nvs().lookupErrors.clear();
+        executor.begin(DeviceId, NULL, &ota, image);
+        V11_CHECK(ota.floorReadable && ota.committedFloor == 9U, "floor " << ota.committedFloor);
+
+        uint32_t counter = 0U;
+        NivaloJournal journal;
+        NivaloPendingRecord pending;
+        pending.commandSeq = 43U;
+        std::strcpy(pending.productId, ProductId);
+        pending.securityVersion = 7U;
+        pending.sizeBytes = 100U;
+        std::strcpy(pending.sha256, "b729e6df1dcaa6ad607e4cef49f8975483f944794e73dc385c2aa16c747fda0b");
+        V11_CHECK(store.writeBoot(3U) && store.writePending(pending), "records");
+        nvs().lookupErrors["nivalo-dev/boot"] = ESP_FAIL;
+        nvs().lookupErrors["nivalo-dev/journal"] = ESP_FAIL;
+        nvs().lookupErrors["nivalo-dev/otaPending"] = ESP_FAIL;
+        V11_CHECK(store.loadBoot(&counter) == NIVALO_STORE_UNREADABLE, "boot counter lookup error");
+        V11_CHECK(store.loadJournal(&journal) == NIVALO_STORE_UNREADABLE, "journal lookup error");
+        V11_CHECK(store.loadPending(&pending) == NIVALO_STORE_UNREADABLE, "pending lookup error");
+        nvs().lookupErrors.clear();
+        V11_CHECK(store.loadJournal(&journal) == NIVALO_STORE_MISSING && store.loadBoot(&counter) == NIVALO_STORE_OK,
+                  "genuinely missing journal");
+    }
     checked++;
 
     context() = "an unreadable catalog is not a first enrollment";
@@ -246,7 +313,7 @@ int floorCases()
     catalog.revision = 8U;
     V11_CHECK(store.writeCatalog(catalog), "catalog write");
     nvs().unreadable.insert("nivalo-dev/catalog");
-    V11_CHECK(store.loadCatalog(&catalog) == NIVALO_STORE_CORRUPT, "unreadable catalog read as missing");
+    V11_CHECK(store.loadCatalog(&catalog) == NIVALO_STORE_UNREADABLE, "unreadable catalog read as missing");
     nvs().unreadable.clear();
     checked++;
     return checked;

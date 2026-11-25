@@ -67,6 +67,19 @@ struct NivaloJournal
 // A fresh journal for a newly claimed device ID: highWater 0, no record.
 NivaloJournal nivaloFreshJournal(const char *deviceId);
 
+// How one durable record read.
+enum NivaloStoreRead
+{
+    NIVALO_STORE_OK = 0,
+    // Never written (the storage reported exactly "not found").
+    NIVALO_STORE_MISSING,
+    // Read, but its contents do not decode (damaged or of another format).
+    NIVALO_STORE_CORRUPT,
+    // The read itself failed (any storage error other than "not found", or no memory to read
+    // into). It may succeed later; the record is never treated as absent or written over.
+    NIVALO_STORE_UNREADABLE
+};
+
 // The committed OTA floor, bound to the product it was committed for.
 struct NivaloFloorRecord
 {

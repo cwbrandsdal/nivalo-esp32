@@ -10,10 +10,12 @@
 #include "NivaloOtaPolicy.h"
 #include "v11_test_support.h"
 
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iomanip>
 #include <map>
 #include <vector>
 
@@ -131,7 +133,13 @@ public:
     std::function<NivaloFunctionOutcome(JsonObjectConst)> customHandler;
     // Storage failures that return false (not a reset).
     bool failTerminalWrite = false;
+    bool failBootJournalWrite = false;
     bool powerCutOnClearPending = false;
+    // How a stored pending record and the floor read (OK reads the stored value).
+    NivaloStoreRead pendingReadResult = NIVALO_STORE_OK;
+    NivaloStoreRead floorReadResult = NIVALO_STORE_OK;
+    // The token armed for the next handler call.
+    uint32_t armedToken = 0U;
 
     // Behaviour of the current step.
     std::string handler;
@@ -168,7 +176,7 @@ public:
     {
         const bool claim = record.hasLast && record.phase == NIVALO_PHASE_CLAIMED && !booting;
         calls.push_back(claim ? "claim" : "done");
-        if (!claim && !booting && failTerminalWrite)
+        if ((!claim && !booting && failTerminalWrite) || (booting && failBootJournalWrite))
         {
             return false;
         }
@@ -229,12 +237,37 @@ public:
 
     bool writeFloor(uint32_t value) override
     {
+        calls.push_back("writeFloor");
         floor = value;
         if (booting && interrupt == "afterFloor")
         {
             throw PowerCut();
         }
         return true;
+    }
+
+    NivaloStoreRead readPending(NivaloPendingRecord *out) override
+    {
+        if (!pendingStored)
+        {
+            return NIVALO_STORE_MISSING;
+        }
+        if (pendingReadResult != NIVALO_STORE_OK)
+        {
+            return pendingReadResult;
+        }
+        *out = pending;
+        return NIVALO_STORE_OK;
+    }
+
+    NivaloStoreRead readFloor(uint32_t *value) override
+    {
+        if (floorReadResult != NIVALO_STORE_OK)
+        {
+            return floorReadResult;
+        }
+        *value = floor;
+        return NIVALO_STORE_OK;
     }
 
     NivaloClockReading readClock() override
@@ -287,13 +320,26 @@ public:
         return accepted;
     }
 
-    NivaloFunctionOutcome invokePrepared(uint32_t token) override
+    bool armPrepared(uint32_t token) override
+    {
+        calls.push_back("arm");
+        armedToken = token;
+        return prepared.ready();
+    }
+
+    NivaloFunctionOutcome invokePrepared() override
     {
         calls.push_back("invoke");
         handlerCalls++;
-        lastToken = token;
-        V11_CHECK(prepared.ready(), "the handler runs only with prepared arguments");
+        lastToken = armedToken;
+        V11_CHECK(prepared.ready() && armedToken != 0U, "the handler runs only armed, with prepared arguments");
         return customHandler ? customHandler(prepared.object()) : outcome(handler);
+    }
+
+    void disarmPrepared() override
+    {
+        calls.push_back("disarm");
+        armedToken = 0U;
     }
 
     void releasePrepared() override { prepared.release(); }
@@ -575,11 +621,10 @@ struct Harness
         }
         device.booting = true;
         NivaloJournal journal = device.journal;
-        NivaloPendingRecord pending = device.pending;
         try
         {
-            executor->begin(DeviceId, device.journalStored ? &journal : NULL, device.pendingStored ? &pending : NULL,
-                            &ota, image != NULL ? *image : runningImage);
+            executor->begin(DeviceId, device.journalStored ? &journal : NULL, &ota,
+                            image != NULL ? *image : runningImage);
             powered = true;
         }
         catch (const PowerCut &)
@@ -1011,6 +1056,51 @@ int argumentCases(JsonObjectConst root)
             V11_CHECK(arguments.prepare(text, std::strlen(text)), "refused " << text);
         checked++;
     }
+
+    context() = "H3: a number is the correctly rounded value of its original token";
+    {
+        struct Case
+        {
+            const char *text;
+            double expected;
+        };
+        // ArduinoJson 6.21 alone yields 1, 1000000000000000 and 184467440737095516160.
+        const Case cases[] = {
+            {"{\"v\":1.0000000000000002220446049250313080847263336181640625}", 1.0 + DBL_EPSILON},
+            {"{\"v\":1000000000000000.5}", 1000000000000000.5},
+            {"{\"v\":18446744073709551616.0}", 18446744073709551616.0},
+            {"{\"v\":[0.1,{\"w\":-2.5e-3}]}", 0.1},
+        };
+        for (const Case &sample : cases)
+        {
+            NivaloPreparedArguments arguments;
+            const bool prepared = arguments.prepare(sample.text, std::strlen(sample.text));
+            JsonVariantConst value = arguments.object()["v"];
+            const double actual = value.is<JsonArrayConst>() ? value[0].as<double>() : value.as<double>();
+            V11_CHECK(prepared && actual == sample.expected,
+                      sample.text << " prepared as " << std::setprecision(17) << actual);
+            if (value.is<JsonArrayConst>())
+            {
+                V11_CHECK(value[1]["w"].as<double>() == -2.5e-3, "nested value " << value[1]["w"].as<double>());
+            }
+        }
+        checked++;
+    }
+
+    context() = "H3: a validator limit of 1 refuses 1 + 2^-52 before the claim";
+    {
+        Focus focus(root);
+        focus.device().validator = [](JsonObjectConst arguments) {
+            return arguments["setpoint"].is<double>() && arguments["setpoint"].as<double>() <= 1.0;
+        };
+        focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+        focus.executor().deliver(
+            commandOperation(43U, "{\"setpoint\":1.0000000000000002220446049250313080847263336181640625}"));
+        V11_CHECK(focus.acks() == "{43 failed invalid_command}" && focus.device().handlerCalls == 0 &&
+                      indexOf(focus.device().calls, "claim") == focus.device().calls.size(),
+                  "an over-limit setpoint passed: " << focus.acks());
+        checked++;
+    }
     return checked;
 }
 
@@ -1018,17 +1108,42 @@ int orderingCases(JsonObjectConst root)
 {
     int checked = 0;
     context() = "H7: the handler call directly follows the final clock reading";
-    Focus focus(root);
-    focus.device().validator = [](JsonObjectConst) { return true; };
-    focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
-    focus.executor().deliver(commandOperation(43U, "{\"to\":1}"));
-    const std::vector<std::string> &calls = focus.device().calls;
-    const size_t prepare = indexOf(calls, "prepare"), claim = indexOf(calls, "claim"), invoke = indexOf(calls, "invoke");
-    std::string trace;
-    for (const std::string &call : calls) trace += call + " ";
-    V11_CHECK(prepare < claim && claim < invoke && invoke < calls.size(), trace);
-    V11_CHECK(invoke > 0U && calls[invoke - 1U] == "clock", "work between the final reading and the handler: " << trace);
-    checked++;
+    {
+        Focus focus(root);
+        focus.device().validator = [](JsonObjectConst) { return true; };
+        focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+        focus.executor().deliver(commandOperation(43U, "{\"to\":1}"));
+        const std::vector<std::string> &calls = focus.device().calls;
+        const size_t prepare = indexOf(calls, "prepare"), claim = indexOf(calls, "claim"), arm = indexOf(calls, "arm"),
+                     invoke = indexOf(calls, "invoke");
+        std::string trace;
+        for (const std::string &call : calls) trace += call + " ";
+        V11_CHECK(prepare < claim && claim < arm && arm < invoke && invoke < calls.size(), trace);
+        // Arming (the completion mailbox and the argument view) precedes the final reading.
+        V11_CHECK(invoke > 1U && calls[invoke - 1U] == "clock" && arm < invoke - 1U,
+                  "work between the final reading and the handler: " << trace);
+        checked++;
+    }
+
+    context() = "H7: a rejection by the final reading withdraws the armed token";
+    {
+        Focus focus(root);
+        focus.device().validator = [](JsonObjectConst) { return true; };
+        focus.device().customHandler = [](JsonObjectConst) { return NIVALO_FUNCTION_SUCCEEDED; };
+        // Claimed at 12:00:30; the final reading is past expiresAt (12:05:00).
+        focus.step("{\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\","
+                   "\"start\":{\"valid\":true,\"now\":\"2026-11-24T12:05:01Z\",\"elapsed\":271}}}");
+        focus.executor().deliver(commandOperation(43U, "{\"to\":1}"));
+        const std::vector<std::string> &calls = focus.device().calls;
+        std::string trace;
+        for (const std::string &call : calls) trace += call + " ";
+        const size_t arm = indexOf(calls, "arm"), disarm = indexOf(calls, "disarm");
+        V11_CHECK(arm < disarm && disarm < calls.size() && indexOf(calls, "invoke") == calls.size() &&
+                      focus.device().armedToken == 0U,
+                  trace);
+        V11_CHECK(focus.acks() == "{43 accepted}{43 failed expired}" && !focus.executor().busy(), focus.acks());
+        checked++;
+    }
     return checked;
 }
 
@@ -1110,6 +1225,136 @@ int pendingCleanupCases(JsonObjectConst root)
     return checked;
 }
 
+// The running image of the vectors' successful activation (product 1111..., security version 7).
+JsonVariantConst activatedImage(JsonObjectConst root)
+{
+    for (JsonObjectConst testCase : root["cases"].as<JsonArrayConst>())
+        if (std::strcmp(str(testCase["id"]), "O2-activated") == 0)
+            for (JsonObjectConst step : testCase["steps"].as<JsonArrayConst>())
+                if (!step["runningImage"].isNull()) return step["runningImage"];
+    V11_CHECK(false, "no activated image in the vectors");
+    return JsonVariantConst();
+}
+
+// The vectors' OTA job (version 7, committed floor 6) is installed and selected; the device
+// restarts with the claim and the pending record durable.
+void activateAndRestart(Focus &focus, JsonObjectConst root)
+{
+    std::string id;
+    const std::string payload = otaPayload(root, &id);
+    focus.step("{\"handler\":\"installed\",\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:00:30Z\","
+               "\"start\":{\"valid\":true,\"now\":\"2026-11-24T12:01:30Z\",\"elapsed\":60}}}");
+    try
+    {
+        focus.executor().deliver(parsed("ota", id, payload));
+        V11_CHECK(false, "the activation did not restart");
+    }
+    catch (const PowerCut &)
+    {
+    }
+    V11_CHECK(focus.device().activations == 1 && focus.device().pendingStored &&
+                  focus.device().journal.phase == NIVALO_PHASE_CLAIMED && focus.device().floor == 6U,
+              "activation setup");
+}
+
+int reconciliationCases(JsonObjectConst root)
+{
+    int checked = 0;
+    std::string id;
+    const std::string payload = otaPayload(root, &id);
+
+    context() = "N2: success is not journaled while the floor is unreadable";
+    {
+        Focus focus(root);
+        activateAndRestart(focus, root);
+        NivaloImageIdentity image = imageFrom(activatedImage(root), focus.device());
+        focus.device().floorReadResult = NIVALO_STORE_UNREADABLE;
+        focus.step("{}");
+        focus.harness->boot(&image, false);
+        focus.executor().republishResult();
+        V11_CHECK(focus.device().journal.phase == NIVALO_PHASE_CLAIMED && focus.device().pendingStored &&
+                      focus.executor().reconciling() && focus.executor().busy() && focus.device().acks.empty() &&
+                      indexOf(focus.device().calls, "writeFloor") == focus.device().calls.size(),
+                  "reconciled over an unreadable floor: " << focus.acks());
+        // Meanwhile the job is still running and nothing new starts.
+        focus.step("{\"handler\":\"installed\",\"clock\":{\"valid\":true,\"now\":\"2026-11-24T12:02:00Z\"}}");
+        focus.executor().deliver(parsed("ota", id, payload));
+        V11_CHECK(focus.acks() == "{43 running}" && focus.device().activations == 0, focus.acks());
+        focus.step("{}");
+        focus.executor().retryReconciliation();
+        V11_CHECK(focus.executor().reconciling() && focus.device().journal.phase == NIVALO_PHASE_CLAIMED &&
+                      focus.device().pendingStored,
+                  "a retry with the floor still unreadable resolved the claim");
+        // The old floor (6) reads again: raised to the installed version, then success, then clear.
+        focus.device().floorReadResult = NIVALO_STORE_OK;
+        focus.executor().retryReconciliation();
+        focus.executor().republishResult();
+        V11_CHECK(!focus.executor().reconciling() && !focus.executor().busy() && focus.device().floor == 7U &&
+                      focus.harness->ota.committedFloor == 7U && focus.harness->ota.floorReadable &&
+                      resultText(focus.device().journal.result) == "succeeded" && !focus.device().pendingStored &&
+                      focus.acks() == "{43 succeeded}",
+                  "floor " << focus.device().floor << " result " << resultText(focus.device().journal.result) << " "
+                           << focus.acks());
+        const std::vector<std::string> &calls = focus.device().calls;
+        V11_CHECK(indexOf(calls, "writeFloor") < indexOf(calls, "done") && indexOf(calls, "done") < indexOf(calls, "clearPending"),
+                  "floor, result and clear out of order");
+        checked++;
+    }
+
+    context() = "N2: a higher committed floor is kept";
+    {
+        Focus focus(root);
+        activateAndRestart(focus, root);
+        NivaloImageIdentity image = imageFrom(activatedImage(root), focus.device());
+        focus.device().floor = 12U;
+        focus.harness->boot(&image, false);
+        V11_CHECK(focus.device().floor == 12U && resultText(focus.device().journal.result) == "succeeded",
+                  "floor " << focus.device().floor);
+        checked++;
+    }
+
+    context() = "M11: an unreadable pending record leaves the claim unresolved";
+    {
+        Focus focus(root);
+        activateAndRestart(focus, root);
+        NivaloImageIdentity image = imageFrom(activatedImage(root), focus.device());
+        focus.device().pendingReadResult = NIVALO_STORE_UNREADABLE;
+        focus.step("{}");
+        focus.harness->boot(&image, false);
+        V11_CHECK(focus.device().journal.phase == NIVALO_PHASE_CLAIMED && focus.device().pendingStored &&
+                      focus.executor().reconciling() && indexOf(focus.device().calls, "clearPending") ==
+                                                            focus.device().calls.size(),
+                  "a pending record that did not read was resolved or cleared");
+        focus.device().pendingReadResult = NIVALO_STORE_OK;
+        focus.executor().retryReconciliation();
+        V11_CHECK(!focus.executor().reconciling() && resultText(focus.device().journal.result) == "succeeded" &&
+                      focus.device().floor == 7U && !focus.device().pendingStored,
+                  "result " << resultText(focus.device().journal.result));
+        checked++;
+    }
+
+    context() = "M11: a damaged pending record is cleared only after the terminal result is durable";
+    {
+        Focus focus(root);
+        activateAndRestart(focus, root);
+        NivaloImageIdentity image = imageFrom(activatedImage(root), focus.device());
+        focus.device().pendingReadResult = NIVALO_STORE_CORRUPT;
+        focus.device().failBootJournalWrite = true;
+        focus.step("{}");
+        focus.harness->boot(&image, false);
+        V11_CHECK(focus.executor().blocked() && focus.device().journal.phase == NIVALO_PHASE_CLAIMED &&
+                      focus.device().pendingStored,
+                  "the pending record went before the terminal result was durable");
+        focus.device().failBootJournalWrite = false;
+        focus.harness->boot(&image, false);
+        V11_CHECK(resultText(focus.device().journal.result) == "indeterminate/execution_unknown" &&
+                      !focus.device().pendingStored && focus.device().floor == 6U,
+                  "result " << resultText(focus.device().journal.result));
+        checked++;
+    }
+    return checked;
+}
+
 int firmwarePlacementCases(JsonObjectConst root)
 {
     int checked = 0;
@@ -1152,6 +1397,7 @@ int main()
     checked += argumentCases(root);
     checked += orderingCases(root);
     checked += pendingCleanupCases(root);
+    checked += reconciliationCases(root);
     checked += firmwarePlacementCases(root);
     return finish("command-execution vectors", checked);
 }

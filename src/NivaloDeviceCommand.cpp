@@ -69,6 +69,16 @@ bool NivaloDevice::Platform::writeFloor(uint32_t floor)
     return _device._store.writeFloor(_device._ota.productId, floor);
 }
 
+NivaloStoreRead NivaloDevice::Platform::readPending(NivaloPendingRecord *pending)
+{
+    return _device._store.loadPending(pending);
+}
+
+NivaloStoreRead NivaloDevice::Platform::readFloor(uint32_t *floor)
+{
+    return _device._store.loadFloor(_device._ota.productId, floor);
+}
+
 NivaloClockReading NivaloDevice::Platform::readClock()
 {
     _device.pumpClock();

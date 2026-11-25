@@ -119,7 +119,9 @@ The response contains only a non-secret device/MQTT identity; the MQTT password
 never leaves the device. The body is read into a fixed 3072-byte buffer and
 must match `device-claim-response.schema.json` exactly (canonical lowercase
 device UUID, DNS host, printable-ASCII client ID and user name of at most 128
-bytes, CA of at most 2048 bytes) before anything is probed or promoted. A lost response or reset reloads and retries the exact
+bytes, CA of at most 2048 bytes) before anything is probed or promoted
+(`NivaloClaimResponse`, which copies every value out of the buffer before it is
+wiped and freed). A lost response or reset reloads and retries the exact
 same attempt, allowing the server to return the same identity idempotently.
 Submitting the same still-pending code again reuses that attempt and its key
 material while allowing new Wi-Fi input; a different code creates a fresh
@@ -130,6 +132,13 @@ written and read back before the active selector changes. On boot, a pending
 attempt whose proof key and MQTT credential match the active identity is treated
 as already committed and cleaned up without repeating the claim exchange. This
 reconciles a reset between the active-selector write and pending-record removal.
+The pending attempt is read with the native NVS API: only "not found" counts as
+no attempt. A pending record that cannot be read is never taken as absent or
+cleared; the unit runs only if its active identity's protocol state already
+reads back, and otherwise reports an error until a restart can read it (or the
+setup button starts a new claim). No recovery acknowledgement and no
+pending-record cleanup happen before the identity's journal and boot counter
+read back.
 Factory provisioning
 therefore leaves no partial identity when Wi-Fi, HTTPS, validation, or storage
 fails. Existing devices can enter setup mode by holding the configured button for
@@ -146,6 +155,10 @@ change and keeps the station running (AP+STA): the saved WLAN is retried after
 `wifiRetryMaximumMs`). Once it connects, the portal closes and the unit
 continues as at startup. Without a setup code the retries run without the
 access point. The setup button opens the portal without these retries.
+The portal's web server listens only on the access point's address
+(`192.168.4.1`) and serves only clients from the access point's subnet, so the
+station's LAN cannot reach it. The wildcard captive DNS runs only in AP-only
+setup; during an outage open `http://192.168.4.1` directly.
 
 Committing a newly claimed identity also prepares its protocol state: a fresh
 command journal (`highWater` 0) for the new device ID and, if missing, the boot
@@ -154,14 +167,17 @@ are durable and read back, and an interrupted commit is finished at boot.
 Wi-Fi changes, credential resets and `factoryReset()` keep the setup code, the
 OTA floor, the journal and the boot counter (section 15 of the spec).
 
-Only a claim (a new device identity) or a first enrollment may initialize the
-journal and the boot counter. Manually supplied credentials (`nivalo.cli.provision.v1`,
-a compiled developer fixture) for the device ID the journal belongs to keep its
-high-water mark and boot counter; on a unit without any protocol state or
-identity they start a first enrollment; anything else (a missing or unreadable
-journal or boot counter for an existing identity, or another device ID's
-history) is refused before anything changes, so the device stays blocked
-rather than replaying an operation. Claim such a unit instead.
+Only a claim (a new device identity) initializes the journal and the boot
+counter. Manually supplied USB credentials (`nivalo.cli.provision.v1`) only
+update the device ID whose journal and boot counter read back on this unit,
+keeping its high-water mark and boot counter. Anything else (an empty unit, such
+as a replacement board given a previously used ID; a missing or unreadable
+journal or boot counter; another device ID's history) is refused before anything
+changes, so the device stays blocked rather than replaying an operation. Claim
+such a unit instead. The compiled developer fixture
+(`NIVALO_ENABLE_LOCAL_DEVELOPER_FIXTURE`, off in every stock profile) may also
+initialize a unit with no protocol state at all; if its own journal and boot
+counter were both lost it seeds them again, so never ship a fixture build.
 
 ### Setup access point and setup code
 
@@ -235,9 +251,9 @@ output:
   TLS identity matching `tests/cli_provision_request_v1.json`, writes a
   durable recovery stage, commits to the inactive Preferences slot, verifies
   both the slot and active selector, replaces any older claim with a verified
-  non-secret tombstone, makes the protocol state durable (see the identity rules
-  above; a request those rules refuse changes nothing), clears the stage, and
-  only then acknowledges and restarts;
+  non-secret tombstone, confirms that device ID's protocol state reads back (see
+  the identity rules above; a request those rules refuse changes nothing),
+  clears the stage, and only then acknowledges and restarts;
 - input is NDJSON bounded to 16 KiB, 256 bytes of work per loop, and a five-second
   frame lifetime; partial, malformed, oversized, extra-field, and unsupported
   requests fail closed;
@@ -426,13 +442,18 @@ device.variable("ledState", &ledState);
 
 The arguments are the exact bytes received, parsed once into the object that
 the validator and then the handler see; nothing is re-serialized in between, so
-a value such as `0.9999999999` reaches the handler as sent. A number that object
+a value such as `0.9999999999` reaches the handler as sent. Integers keep their
+exact value; every other number is the correctly rounded `double` of its
+original token (`strtod`), not ArduinoJson's approximation, so a validator that
+allows at most 1 also refuses the exact decimal of 1 + 2⁻⁵². A number that object
 cannot represent (non-finite, an integer outside 64 bits, a nonzero value that
 underflows to zero) is refused as `invalid_command` before the claim, like
 `null`. The validator runs before the operation is claimed (`false` rejects it
 as `invalid_command`). The handler and its arguments are prepared before the
-claim, so the final clock and deadline reading is immediately followed by the
-handler call. The handler is called at most once and returns:
+claim, and the completion token and argument view are armed before the final
+clock and deadline reading, so that reading is immediately followed by the
+handler call; a rejection by that reading withdraws the token. The handler is
+called at most once and returns:
 
 | Outcome | ACK |
 |---|---|
@@ -522,20 +543,28 @@ is `esp_ota_set_boot_partition()` called, exactly once. A definite refusal is a
 zero-effect `ota_rejected`; an uncertain failure keeps the claim and reboots.
 At boot, before connecting, a claimed OTA record with a matching pending record
 is reconciled by hashing exactly `sizeBytes` bytes of the running slot: on a
-match the floor is committed, then `succeeded` is journaled, then the pending
-record is cleared; otherwise `indeterminate` / `execution_unknown`. The pending
-record is only ever cleared after the terminal result is durable. A committed
-floor record that cannot be read disables OTA (every job is `ota_rejected`) and
-is left in place for recovery; it is never taken as "no floor".
+match the floor is raised to at least the installed version (a higher floor is
+kept) and read back, then `succeeded` is journaled, then the pending record is
+cleared; otherwise (a different image, or a pending record that is missing or
+damaged) `indeterminate` / `execution_unknown`. The pending record is only ever
+cleared after the terminal result is durable. When the pending record cannot be
+read, or the installed image runs but the floor cannot be read, the claim and
+the pending record stay as they are and the reconciliation is retried every
+10 s; meanwhile the job is answered `running` and nothing new starts. A
+committed floor record that cannot be read disables OTA (every job is
+`ota_rejected`) and is left in place for recovery; it is never taken as "no
+floor". The protocol state uses the native NVS API, where only "not found"
+means absent; any other read error is "unreadable".
 
 Populate `firmwareSigningKeys` with ECDSA P-256 SubjectPublicKeyInfo PEM values
 selected by exact `keyId`; an empty trust set rejects every OTA job. The
 `Esp32Only` example carries the release public key of each environment in the
 tracked `include/nivalo_firmware_trust.h` (production `nivalo-prod-2026-11`,
 staging `staging-d364850176bd64cd`), selected by `NIVALO_ENVIRONMENT_STAGING` or
-`NIVALO_ENVIRONMENT_PRODUCTION` in `platformio.ini`. A staging or production
-build without its key, with a key defined anywhere else, or with a `test-` key
-ID fails to compile. The public key is the SubjectPublicKeyInfo of
+`NIVALO_ENVIRONMENT_PRODUCTION` in `platformio.ini`. Both slots, current and
+previous, come from that file: a staging or production build without its key,
+with either slot defined anywhere else (`nivalo_config.h`, a build flag), or
+with a `test-` key ID fails to compile. The public key is the SubjectPublicKeyInfo of
 `Nivalo.<IoT|Staging>.Firmware.ArtifactSigning.CurrentPrivateKeyPkcs8Base64`,
 derived in memory (as `nivalo-platform/infrastructure/nivalo-vm/Write-NivaloEnvFiles.ps1`
 does for the console). Provision
@@ -596,13 +625,18 @@ tests replay `nivalo-protocol`'s `fixtures/v1.1` against them:
   uplink the builders produce is replayed through the protocol's reference
   model (`tests/protocol_v1_1.py`) by `tests/validate_v11_uplinks.py`;
 - `nivalo_v11_store_tests`: the real `NivaloDeviceStore` on a map-backed
-  stand-in for Preferences (`tests/host/fakes`): what a credential change may
-  do to the journal and the boot counter, and unreadable floor and catalog
-  records.
+  stand-in for the native NVS API (`tests/host/fakes`) with injectable lookup
+  and read errors: what a credential change may do to the journal and the boot
+  counter, and unreadable floor, journal, pending and catalog records;
+- `nivalo_v11_claim_tests`: claim exchange responses through
+  `NivaloClaimResponse` (validation and credential extraction, with the
+  response buffer wiped before any value is read).
 
-The execution tests also cover asynchronous completion tokens, argument
-preparation, the order of the final clock reading and the handler call, and
-pending-record cleanup after a failed or interrupted terminal write.
+The execution tests also cover asynchronous completion tokens, correctly
+rounded argument numbers, the order of arming, the final clock reading and the
+handler call, pending-record cleanup after a failed or interrupted terminal
+write, and boot reconciliation while the pending record or the floor cannot be
+read.
 
 The presence, command-dispatch and ingest-metering vectors describe the server
 and are not replayed here.

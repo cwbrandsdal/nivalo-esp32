@@ -184,11 +184,15 @@ private:
         bool writePending(const NivaloPendingRecord &pending) override;
         bool clearPending() override;
         bool writeFloor(uint32_t floor) override;
+        NivaloStoreRead readPending(NivaloPendingRecord *pending) override;
+        NivaloStoreRead readFloor(uint32_t *floor) override;
         NivaloClockReading readClock() override;
         void publishAck(const NivaloAck &ack) override;
         bool hasFunction(const char *name) override;
         bool prepareFunction(const NivaloOperation &operation) override;
-        NivaloFunctionOutcome invokePrepared(uint32_t token) override;
+        bool armPrepared(uint32_t token) override;
+        NivaloFunctionOutcome invokePrepared() override;
+        void disarmPrepared() override;
         void releasePrepared() override;
         NivaloRefreshOutcome refreshCatalog() override;
         NivaloDownloadOutcome downloadImage(const NivaloOperation &operation, uint32_t token) override;
@@ -205,6 +209,7 @@ private:
     static void onTrustedSync(void *context, int64_t utcMs, int64_t monotonicUs);
     void feedWatchdog();
     void serviceCompletion();
+    void serviceReconciliation();
     void serviceCatalogRetry();
     void mqttCallback(char *topic, byte *message, unsigned int length);
     void serviceConnection();
@@ -272,6 +277,11 @@ private:
     // before the claim.
     NivaloPreparedArguments _prepared;
     const NivaloRegisteredFunction *_preparedFunction = NULL;
+    // Resolved by armPrepared(), so the handler call needs nothing else.
+    NivaloFunctionHandler _armedHandler = NULL;
+    JsonObjectConst _armedArguments;
+    // Next retry of a boot reconciliation that could not read its evidence.
+    int64_t _reconcileRetryAtUs = 0;
     // The asynchronous completion mailbox (written by any task, drained by loop()).
     volatile uint32_t _completionToken = 0U;
     volatile bool _completionQueued = false;

@@ -74,13 +74,14 @@ public:
     bool begin(bool allowPlaintextNvs);
     bool load(NivaloRuntimeCredentials &credentials);
     bool commit(const NivaloRuntimeCredentials &credentials);
-    bool loadPending(NivaloPendingClaimAttempt &attempt);
+    // The pending claim attempt, which is also the recovery marker of a claim commit: OK, MISSING
+    // (never written, or superseded), CORRUPT or UNREADABLE (a failed read is never absence).
+    NivaloStoreRead loadPending(NivaloPendingClaimAttempt &attempt);
     bool savePending(const NivaloPendingClaimAttempt &attempt);
     bool clearPending();
-    // A staged CLI transaction and whether it was admitted as a first enrollment (protocol state
-    // initialized with it).
-    bool loadCliStaged(NivaloRuntimeCredentials &credentials, bool *initializeState);
-    bool stageCli(const NivaloRuntimeCredentials &credentials, bool initializeState);
+    // A staged CLI transaction (manual credentials for an identity whose protocol state exists).
+    bool loadCliStaged(NivaloRuntimeCredentials &credentials);
+    bool stageCli(const NivaloRuntimeCredentials &credentials);
     bool clearCliStaged();
     bool clear();
     // True only when the credential namespace is actually encrypted (NVS encryption with its key
@@ -121,7 +122,10 @@ private:
     // Protocol state (command journal, boot counter) after a claim of deviceId: initialized when
     // it belongs to another identity, kept when it is deviceId's (an interrupted commit).
     bool prepareClaimedState(const String &deviceId);
-    bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool initializeState, bool stageFirst);
+    bool finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst);
+    // The protocol state of deviceId (journal and boot counter) reads back: the condition for any
+    // claim recovery ACK or pending-marker cleanup.
+    bool protocolStateReady(const String &deviceId);
     void sendCliResponse(const char *schema, const String &requestId, bool ok, bool includeIdentity = false);
     void sendCliClaimResponse(const String &requestId, bool ok);
     void failCliClaim();
@@ -140,6 +144,9 @@ private:
     void handlePortalRoot();
     void handlePortalSubmit();
     void handleNotFound();
+    // The current HTTP client is a station of the setup access point (not the station-side LAN).
+    bool fromSetupNetwork();
+    void refuseOffSetupNetwork();
     bool exchangeClaim();
     bool verifyExistingIdentity();
     bool createPendingAttempt(const String &claimCode, const String &ssid, const String &wifiPassword);
@@ -155,6 +162,7 @@ private:
     DNSServer _dns;
     WebServer _web;
     bool _portalRunning = false;
+    bool _dnsRunning = false;
     bool _changingWifiOnly = false;
     bool _outagePortal = false;
     bool _wifiAttempting = false;

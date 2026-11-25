@@ -5,29 +5,27 @@
 // resets and factoryReset() of the provisioning store leave it alone (specs/cloud-mqtt-v1.1.md
 // section 15): boot counter, command journal, OTA pending record and floor, capability catalog.
 // Every critical write is read back before it is relied on.
+//
+// The native NVS API is used, not Preferences: Preferences reports every lookup error as an
+// absent key, and an unreadable floor or journal must never pass for a missing one. Only
+// ESP_ERR_NVS_NOT_FOUND reads as NIVALO_STORE_MISSING; every other error is
+// NIVALO_STORE_UNREADABLE.
 
 #include <Arduino.h>
-#include <Preferences.h>
+#include <nvs.h>
 
 #include "NivaloCatalog.h"
 #include "NivaloJournal.h"
 #include "NivaloOtaPolicy.h"
 
-enum NivaloStoreRead
-{
-    NIVALO_STORE_OK = 0,
-    NIVALO_STORE_MISSING,
-    NIVALO_STORE_CORRUPT
-};
-
 enum NivaloIdentityAdmission
 {
     // The journal and the boot counter belong to this device ID: keep them, write nothing.
     NIVALO_IDENTITY_KEEP = 0,
-    // No protocol state and no active identity on this unit: it may be initialized.
+    // No protocol state on this unit at all: the developer fixture may initialize it.
     NIVALO_IDENTITY_FIRST_ENROLLMENT,
-    // Missing or unreadable records for an identity that exists, or another device ID's state.
-    // Nothing may be written; the credentials are refused (claim the device instead).
+    // Missing or unreadable records, or another device ID's state. Nothing may be written; the
+    // credentials are refused (claim the device instead).
     NIVALO_IDENTITY_REFUSED
 };
 
@@ -48,24 +46,28 @@ public:
     bool clearPending();
 
     // The committed floor of productId: OK with *floor; MISSING when none was committed for this
-    // product (*floor 0); CORRUPT when a record exists but cannot be read. Then OTA must stay
-    // disabled and the record is left as it is for recovery.
+    // product (*floor 0); CORRUPT or UNREADABLE when a record may exist but cannot be read. Then
+    // OTA must stay disabled and the record is left as it is for recovery.
     NivaloStoreRead loadFloor(const char *productId, uint32_t *floor);
     bool writeFloor(const char *productId, uint32_t floor);
 
-    // CORRUPT also covers a read that could not run (allocation): never write over it.
+    // Never write over a catalog that did not read OK or MISSING.
     NivaloStoreRead loadCatalog(NivaloCatalogState *state);
     bool writeCatalog(const NivaloCatalogState &state);
 
     // --- Identity (section 15) -------------------------------------------------------------------
     // The journal's high-water mark and the boot counter are the replay and presence history of a
-    // device ID. Only an authoritative claim (a new device identity) or a first enrollment may
-    // initialize them; every other credential change keeps them or leaves the device blocked.
+    // device ID. Only an authoritative claim (a new device identity) may initialize them, or the
+    // local developer fixture (off in every stock profile) on a unit with no protocol state.
 
-    // Manually supplied credentials (USB provisioning, a compiled fixture) for deviceId.
-    // hasActiveIdentity: credentials of some device ID are already active on this unit.
-    NivaloIdentityAdmission admitIdentity(const char *deviceId, bool hasActiveIdentity);
-    // After a claim of deviceId or an admitted first enrollment: a journal of deviceId that reads
+    // USB credentials (nivalo.cli.provision.v1) for deviceId: KEEP only when the journal of
+    // deviceId and the boot counter read back; anything else, an empty unit included, is REFUSED.
+    // A board with empty NVS cannot prove that a supplied, previously used ID never executed.
+    NivaloIdentityAdmission admitManualCredentials(const char *deviceId);
+    // The compiled local developer fixture: as admitManualCredentials(), and FIRST_ENROLLMENT when
+    // neither a journal nor a boot counter exists (both genuinely not found).
+    NivaloIdentityAdmission admitDeveloperFixture(const char *deviceId);
+    // After a claim of deviceId or an admitted fixture enrollment: a journal of deviceId that reads
     // back is kept, anything else is replaced by a fresh one (highWater 0); a readable boot
     // counter is kept, otherwise it starts at 0. Idempotent, so an interrupted commit repeats it.
     bool initializeIdentity(const char *deviceId);
@@ -73,10 +75,14 @@ public:
     bool identityReady(const char *deviceId);
 
 private:
+    NivaloIdentityAdmission admit(const char *deviceId, bool allowFirstEnrollment);
+    bool commit();
     bool writeBlob(const char *key, const uint8_t *data, size_t length);
-    size_t readBlob(const char *key, uint8_t *data, size_t capacity, bool *present);
+    // OK with *length bytes in data, MISSING, UNREADABLE, or CORRUPT when the stored blob is
+    // empty or larger than capacity (no record of this format).
+    NivaloStoreRead readBlob(const char *key, uint8_t *data, size_t capacity, size_t *length);
 
-    Preferences _preferences;
+    nvs_handle_t _handle = 0;
     bool _opened = false;
 };
 

@@ -77,19 +77,27 @@ public:
     virtual bool writePending(const NivaloPendingRecord &pending) = 0;
     virtual bool clearPending() = 0;
     virtual bool writeFloor(uint32_t floor) = 0;
+    // Reads, with the store's distinction between a missing record, a damaged one and a read
+    // that failed. readFloor() is the committed floor of the running product.
+    virtual NivaloStoreRead readPending(NivaloPendingRecord *pending) = 0;
+    virtual NivaloStoreRead readFloor(uint32_t *floor) = 0;
     // Folds every trusted synchronisation since the last call into the executor
     // (NivaloExecutor::onTrustedSync), then returns a fresh reading.
     virtual NivaloClockReading readClock() = 0;
     virtual void publishAck(const NivaloAck &ack) = 0;
     // Generic commands. prepareFunction() runs before the claim: it parses the operation's
     // original argument bytes once into the object the handler will receive (refusing values
-    // that object cannot represent) and runs the handler's own argument check. invokePrepared()
-    // calls exactly that handler with exactly that object and does no other work first, so the
-    // executor's final clock reading is the last step before the effect. releasePrepared() frees
+    // that object cannot represent) and runs the handler's own argument check. armPrepared()
+    // runs after the claim and before the final clock reading: it accepts completions for token
+    // from then on (also from a task the handler starts) and resolves the handler and the
+    // argument view, so invokePrepared() is the handler call and nothing else. disarmPrepared()
+    // withdraws the token when the final reading rejects the operation. releasePrepared() frees
     // the object; it is called after every prepareFunction().
     virtual bool hasFunction(const char *name) = 0;
     virtual bool prepareFunction(const NivaloOperation &operation) = 0;
-    virtual NivaloFunctionOutcome invokePrepared(uint32_t token) = 0;
+    virtual bool armPrepared(uint32_t token) = 0;
+    virtual NivaloFunctionOutcome invokePrepared() = 0;
+    virtual void disarmPrepared() = 0;
     virtual void releasePrepared() = 0;
     virtual NivaloRefreshOutcome refreshCatalog() = 0;
     // OTA. A download may call NivaloExecutor::deadlinePermits() while it runs.
@@ -108,10 +116,20 @@ public:
 
     // Boot: adopt the stored journal for deviceId and reconcile a claimed record (section 11.4
     // step 4) before any connection. journal is NULL when it is missing or corrupt; then the
-    // executor stays blocked until the device is re-claimed. ota supplies the running image's
-    // security version and committed floor; the executor updates the floor.
-    void begin(const char *deviceId, const NivaloJournal *journal, const NivaloPendingRecord *pending,
-               NivaloOtaDevice *ota, const NivaloImageIdentity &runningImage);
+    // executor stays blocked until the device is re-claimed. The pending record and the floor are
+    // read through the platform; ota supplies the running image's security version and receives
+    // the committed floor (and whether it is readable), which the executor keeps up to date.
+    //
+    // A claimed OTA whose evidence cannot be read yet (pending record unreadable, or the new
+    // image runs but the floor cannot be read) stays claimed with its pending record: reconciling()
+    // holds the executor busy until retryReconciliation() can finish it. Success is journaled
+    // only after a floor of at least the installed version is durable; a pending record is
+    // cleared only once no claim depends on it.
+    void begin(const char *deviceId, const NivaloJournal *journal, NivaloOtaDevice *ota,
+               const NivaloImageIdentity &runningImage);
+    // Reads again what boot reconciliation could not read, and finishes it when it can.
+    void retryReconciliation();
+    bool reconciling() const { return _reconcile != RECONCILE_NONE; }
 
     // One identified downlink.
     void deliver(const NivaloOperation &operation);
@@ -139,6 +157,30 @@ public:
     const NivaloPendingRecord &pending() const { return _pending; }
 
 private:
+    enum Reconcile
+    {
+        RECONCILE_NONE = 0,
+        // The pending record of the claimed OTA could not be read.
+        RECONCILE_PENDING,
+        // The pending image runs; the floor could not be read, so it cannot be raised yet.
+        RECONCILE_FLOOR
+    };
+    enum ImageVerdict
+    {
+        IMAGE_UNCHECKED = 0,
+        IMAGE_MATCHES,
+        IMAGE_DIFFERS
+    };
+
+    void readPending();
+    void readFloor();
+    void reconcile();
+    bool runningImageIsPending();
+    // A durable floor of at least the pending version (any higher floor kept); false when it is
+    // not durable yet (waiting for a readable floor, or blocked on a failed write).
+    bool commitFloor();
+    void waitFor(Reconcile stage);
+    void clearStalePending();
     void execute(const NivaloOperation &operation);
     NivaloAckCode validate(const NivaloOperation &operation);
     // A fresh reading against the deadline; on failure *result is the terminal failure and
@@ -158,7 +200,12 @@ private:
     NivaloOtaDevice *_ota = NULL;
     NivaloJournal _journal;
     NivaloPendingRecord _pending;
+    // A pending record may be stored (it read, or its read did not report "not found").
     bool _hasPending = false;
+    NivaloStoreRead _pendingRead = NIVALO_STORE_MISSING;
+    Reconcile _reconcile = RECONCILE_NONE;
+    ImageVerdict _imageVerdict = IMAGE_UNCHECKED;
+    NivaloImageIdentity _runningImage;
     bool _blocked = true;
     bool _busy = false;
     uint32_t _token = 0U;

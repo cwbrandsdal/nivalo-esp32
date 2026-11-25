@@ -7,15 +7,20 @@
 // (NIVALO_ENVIRONMENT_STAGING or NIVALO_ENVIRONMENT_PRODUCTION); main.cpp refuses to build a
 // staging or production image without its anchor or with a reserved test- key ID.
 //
-// Rotation: add the new key as CURRENT and move the old one to PREVIOUS, ship that firmware,
-// sign with the new key once it is established, then drop PREVIOUS (README, "Firmware updates").
+// Rotation: add the new key as CURRENT and move the old one to PREVIOUS (both here, inside the
+// environment's block), ship that firmware, sign with the new key once it is established, then
+// drop PREVIOUS (README, "Firmware updates").
 
 #if defined(NIVALO_ENVIRONMENT_PRODUCTION) && defined(NIVALO_ENVIRONMENT_STAGING)
 #error "Select one environment: NIVALO_ENVIRONMENT_PRODUCTION or NIVALO_ENVIRONMENT_STAGING"
 #endif
 
-#if defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) && (defined(NIVALO_ENVIRONMENT_PRODUCTION) || defined(NIVALO_ENVIRONMENT_STAGING))
-#error "Staging and production trust anchors come from nivalo_firmware_trust.h only; remove the local key definitions"
+// Both slots, current and previous, come from this tracked file in a staging or production build:
+// a key slot defined anywhere else (nivalo_config.h, a build flag) fails the build.
+#if (defined(NIVALO_ENVIRONMENT_PRODUCTION) || defined(NIVALO_ENVIRONMENT_STAGING)) &&             \
+    (defined(NIVALO_FIRMWARE_CURRENT_KEY_ID) || defined(NIVALO_FIRMWARE_CURRENT_PUBLIC_KEY_PEM) || \
+     defined(NIVALO_FIRMWARE_PREVIOUS_KEY_ID) || defined(NIVALO_FIRMWARE_PREVIOUS_PUBLIC_KEY_PEM))
+#error "Staging and production trust anchors (current and previous) come from nivalo_firmware_trust.h only; remove the local key definitions"
 #endif
 
 #if defined(NIVALO_ENVIRONMENT_PRODUCTION)

@@ -22,7 +22,8 @@ public:
     // bytes is a JSON object that already passed the strict scanner. False (and nothing held)
     // when it cannot be parsed, is not an object, contains null, or has a number the parsed value
     // cannot represent: a non-finite value, an integer outside 64 bits, or a nonzero number that
-    // underflows to zero.
+    // underflows to zero. Integers keep their exact value; every other number holds the correctly
+    // rounded binary64 value of its original token (strtod), not ArduinoJson's approximation.
     bool prepare(const char *bytes, size_t length);
     void release();
     bool ready() const { return _document != NULL; }

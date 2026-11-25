@@ -1,4 +1,5 @@
 #include "NivaloProvisioning.h"
+#include "NivaloClaimResponse.h"
 #include "NivaloCliClaimRecoveryPolicy.h"
 #include "NivaloConnection.h"
 #include "NivaloJsonStrict.h"
@@ -23,6 +24,7 @@
 #include <mbedtls/pk.h>
 #include <mbedtls/sha256.h>
 #include <new>
+#include <nvs.h>
 #include <sdkconfig.h>
 
 
@@ -182,7 +184,49 @@ bool NivaloProvisioningStore::commit(const NivaloRuntimeCredentials &credentials
     return load(committed) && serializeCredentials(committed) == encoded;
 }
 bool NivaloProvisioningStore::clear() { return _opened && _preferences.clear(); }
-bool NivaloProvisioningStore::loadPending(NivaloPendingClaimAttempt &a) { return _opened && parsePending(_preferences.getString("pending",""),a); }
+// A string of the namespace, read with the native API: Preferences reports a failed read as an
+// absent key. Only ESP_ERR_NVS_NOT_FOUND is MISSING.
+static NivaloStoreRead readNvsString(const char *space, const char *key, String &value)
+{
+    nvs_handle_t handle = 0;
+    const esp_err_t opened = nvs_open(space, NVS_READONLY, &handle);
+    if (opened != ESP_OK) return opened == ESP_ERR_NVS_NOT_FOUND ? NIVALO_STORE_MISSING : NIVALO_STORE_UNREADABLE;
+    size_t length = 0U;
+    const esp_err_t lookup = nvs_get_str(handle, key, NULL, &length);
+    NivaloStoreRead result = lookup == ESP_ERR_NVS_NOT_FOUND ? NIVALO_STORE_MISSING : NIVALO_STORE_UNREADABLE;
+    if (lookup == ESP_OK && length > 0U)
+    {
+        char *buffer = new (std::nothrow) char[length];
+        if (buffer != NULL)
+        {
+            size_t read = length;
+            if (nvs_get_str(handle, key, buffer, &read) == ESP_OK && read == length && buffer[length - 1U] == '\0')
+            {
+                value = buffer;
+                // A failed String allocation is a failed read too.
+                result = value.length() == length - 1U ? NIVALO_STORE_OK : NIVALO_STORE_UNREADABLE;
+            }
+            memset(buffer, 0, length);
+            delete[] buffer;
+        }
+    }
+    nvs_close(handle);
+    return result;
+}
+
+NivaloStoreRead NivaloProvisioningStore::loadPending(NivaloPendingClaimAttempt &a)
+{
+    a = NivaloPendingClaimAttempt();
+    if (!_opened) return NIVALO_STORE_UNREADABLE;
+    String encoded;
+    const NivaloStoreRead read = readNvsString("nivalo-prov", "pending", encoded);
+    if (read != NIVALO_STORE_OK) return read;
+    // Superseded (cleared) is absent; anything else that does not parse is not.
+    if (encoded == PendingClaimTombstone) return NIVALO_STORE_MISSING;
+    if (parsePending(encoded, a)) return NIVALO_STORE_OK;
+    a = NivaloPendingClaimAttempt();
+    return NIVALO_STORE_CORRUPT;
+}
 bool NivaloProvisioningStore::savePending(const NivaloPendingClaimAttempt &a)
 {
     if(!_opened||!a.valid())return false; String encoded=serializePending(a);
@@ -195,19 +239,13 @@ bool NivaloProvisioningStore::clearPending()
     return _preferences.putString("pending", PendingClaimTombstone) == length &&
            _preferences.getString("pending", "") == PendingClaimTombstone;
 }
-bool NivaloProvisioningStore::loadCliStaged(NivaloRuntimeCredentials &credentials, bool *initializeState)
+bool NivaloProvisioningStore::loadCliStaged(NivaloRuntimeCredentials &credentials)
 {
-    *initializeState = false;
-    if (!_opened || !parseCredentials(_preferences.getString("cliStage", CliStageTombstone), credentials)) return false;
-    *initializeState = _preferences.getUChar("cliInit", 0U) == 1U;
-    return true;
+    return _opened && parseCredentials(_preferences.getString("cliStage", CliStageTombstone), credentials);
 }
-bool NivaloProvisioningStore::stageCli(const NivaloRuntimeCredentials &credentials, bool initializeState)
+bool NivaloProvisioningStore::stageCli(const NivaloRuntimeCredentials &credentials)
 {
     if (!_opened || !credentials.valid()) return false;
-    // The admission decision travels with the stage, so a resumed transaction makes the same one.
-    const uint8_t flag = initializeState ? 1U : 0U;
-    if (_preferences.putUChar("cliInit", flag) != 1U || _preferences.getUChar("cliInit", 2U) != flag) return false;
     const String encoded = serializeCredentials(credentials);
     return _preferences.putString("cliStage", encoded) == encoded.length() &&
            _preferences.getString("cliStage", "") == encoded;
@@ -216,13 +254,15 @@ bool NivaloProvisioningStore::clearCliStaged()
 {
     if (!_opened) return false;
     const size_t length = sizeof(CliStageTombstone) - 1U;
-    const bool cleared = _preferences.putString("cliStage", CliStageTombstone) == length &&
-                         _preferences.getString("cliStage", "") == CliStageTombstone;
-    (void)_preferences.putUChar("cliInit", 0U);
-    return cleared;
+    return _preferences.putString("cliStage", CliStageTombstone) == length &&
+           _preferences.getString("cliStage", "") == CliStageTombstone;
 }
 
-NivaloProvisioning::NivaloProvisioning() : _web(80) {}
+// The setup access point's address (the SoftAP default, pinned): the portal's HTTP server listens
+// only there, never on the station's LAN address.
+static IPAddress setupNetworkAddress() { return IPAddress(192, 168, 4, 1); }
+
+NivaloProvisioning::NivaloProvisioning() : _web(setupNetworkAddress(), 80) {}
 NivaloProvisioning::~NivaloProvisioning() { delete[] _cliLine; }
 
 bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
@@ -242,9 +282,11 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
     {
         _credentials = *_config.localDeveloperFixture;
         if (!_credentials.valid()) { setError("Local developer fixture is invalid"); return false; }
-        // A fixture is manual credentials: it keeps its own history or starts a first enrollment,
-        // never reseeds another identity's (or lost) protocol state.
-        const NivaloIdentityAdmission admission = _deviceState.admitIdentity(_credentials.deviceId.c_str(), false);
+        // Developer builds only (off in every stock profile): the fixture keeps its own history,
+        // or initializes protocol state on a unit that has none. It never takes over another
+        // identity's state, but if its own journal and boot counter were both lost it seeds them
+        // again, so a still-live operation could run twice. Never ship a fixture build.
+        const NivaloIdentityAdmission admission = _deviceState.admitDeveloperFixture(_credentials.deviceId.c_str());
         const bool prepared = admission == NIVALO_IDENTITY_KEEP ||
                               (admission == NIVALO_IDENTITY_FIRST_ENROLLMENT &&
                                _deviceState.initializeIdentity(_credentials.deviceId.c_str()));
@@ -259,10 +301,9 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
     if (_config.setupButtonPin >= 0)
         pinMode(_config.setupButtonPin, _config.setupButtonActiveLow ? INPUT_PULLUP : INPUT_PULLDOWN);
     NivaloRuntimeCredentials cliStaged;
-    bool initializeState = false;
-    if (_store.loadCliStaged(cliStaged, &initializeState))
+    if (_store.loadCliStaged(cliStaged))
     {
-        if (!finishCliProvisioning(cliStaged, initializeState, false))
+        if (!finishCliProvisioning(cliStaged, false))
         {
             setError("Interrupted CLI provisioning recovery failed");
             return false;
@@ -271,7 +312,22 @@ bool NivaloProvisioning::begin(const NivaloProvisioningConfig &config)
         return true;
     }
     bool hasCredentials = _store.load(_credentials);
-    bool hasPendingAttempt = _store.loadPending(_claimAttempt);
+    const NivaloStoreRead pendingRead = _store.loadPending(_claimAttempt);
+    const bool hasPendingAttempt = pendingRead == NIVALO_STORE_OK;
+    if (pendingRead == NIVALO_STORE_UNREADABLE || pendingRead == NIVALO_STORE_CORRUPT)
+    {
+        // Possibly the recovery marker of an interrupted claim commit: never taken as absent, and
+        // left as it is. Credentials whose protocol state reads back need nothing from it;
+        // anything else waits for a restart that can read it (or the setup button, which starts
+        // over with a new claim).
+        if (!hasCredentials || !protocolStateReady(_credentials.deviceId))
+        {
+            setError("Pending claim record unreadable; restart the unit, or hold the setup button to claim it again");
+            return false;
+        }
+        startWifi(_credentials.wifiSsid, _credentials.wifiPassword);
+        return true;
+    }
     if (hasCredentials && hasPendingAttempt && pendingIdentityWasCommitted(_credentials, _claimAttempt))
     {
         // The A/B selector is the commit point. A reset can occur after it is
@@ -354,7 +410,11 @@ void NivaloProvisioning::continueAfterTimeSync()
 void NivaloProvisioning::loop()
 {
     handleCliSerial();
-    if (_portalRunning) { _dns.processNextRequest(); _web.handleClient(); }
+    if (_portalRunning)
+    {
+        if (_dnsRunning) _dns.processNextRequest();
+        _web.handleClient();
+    }
     serviceOutagePortal();
     if (_config.setupButtonPin >= 0)
     {
@@ -645,10 +705,13 @@ bool NivaloProvisioning::handleCliClaim(JsonObject root, const String &requestId
             recoveryAction != NIVALO_CLI_CLAIM_PRESERVE_STATE;
         if (!matches || recoveryAction == NIVALO_CLI_CLAIM_REJECT_REPLAY) return false;
         // A committed claim whose protocol state was not finished completes that first; the
-        // pending record is its recovery marker.
-        if (mustClearCommittedPending &&
-            ((pendingIdentityWasCommitted(_credentials, _claimAttempt) && !prepareClaimedState(_credentials.deviceId)) ||
-             !_store.clearPending())) return false;
+        // pending record is its recovery marker. No recovery ACK and no marker cleanup happen
+        // before this identity's protocol state reads back (a marker that could not be read at
+        // boot leaves nothing to finish it with, so such a unit is refused here).
+        if (pendingIdentityWasCommitted(_credentials, _claimAttempt) && !prepareClaimedState(_credentials.deviceId))
+            return false;
+        if (!protocolStateReady(_credentials.deviceId)) return false;
+        if (mustClearCommittedPending && !_store.clearPending()) return false;
         _claimAttempt = NivaloPendingClaimAttempt();
         _pendingClaimCode = "";
         _changingWifiOnly = false;
@@ -737,13 +800,13 @@ bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &reque
     replacement.mqttUsername = mqttUsername;
     replacement.mqttPassword = mqttPassword;
     if (!replacement.valid()) return false;
-    // Manual credentials never reseed protocol state: the same device ID keeps its journal and
-    // boot counter; a unit with no protocol state and no identity is a first enrollment; anything
-    // else (lost records, another device ID's history) is refused before anything changes.
-    const NivaloIdentityAdmission admission = _deviceState.admitIdentity(deviceId.c_str(), _credentials.valid());
+    // Manual credentials never create protocol state: they only update a device ID whose journal
+    // and boot counter read back on this unit. Anything else (an empty unit, lost or unreadable
+    // records, another device ID's history) is refused before anything changes; fresh protocol
+    // state comes only from a claim.
+    const NivaloIdentityAdmission admission = _deviceState.admitManualCredentials(deviceId.c_str());
     _deviceState.end();
-    if (admission == NIVALO_IDENTITY_REFUSED ||
-        !finishCliProvisioning(replacement, admission == NIVALO_IDENTITY_FIRST_ENROLLMENT, true)) return false;
+    if (admission != NIVALO_IDENTITY_KEEP || !finishCliProvisioning(replacement, true)) return false;
 
     _pending = NivaloRuntimeCredentials();
     _claimAttempt = NivaloPendingClaimAttempt();
@@ -751,18 +814,16 @@ bool NivaloProvisioning::handleCliProvision(JsonObject root, const String &reque
     return true;
 }
 
-bool NivaloProvisioning::finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool initializeState,
-                                               bool stageFirst)
+bool NivaloProvisioning::finishCliProvisioning(const NivaloRuntimeCredentials &replacement, bool stageFirst)
 {
     struct Operations
     {
         NivaloProvisioningStore &store;
         NivaloDeviceStore &deviceState;
         const NivaloRuntimeCredentials &replacement;
-        bool initializeState;
         NivaloRuntimeCredentials committed;
 
-        bool stage() { return store.stageCli(replacement, initializeState); }
+        bool stage() { return store.stageCli(replacement); }
         bool commitActive() { return store.commit(replacement); }
         bool supersedePendingClaim() { return store.clearPending(); }
         bool verifyActive()
@@ -770,19 +831,16 @@ bool NivaloProvisioning::finishCliProvisioning(const NivaloRuntimeCredentials &r
             return store.load(committed) &&
                    serializeCredentials(committed) == serializeCredentials(replacement);
         }
-        // Inside the transaction: the stage is cleared only once the protocol state is durable
-        // and read back. A first enrollment initializes it (idempotently); otherwise it must
-        // already belong to this device ID.
+        // Inside the transaction: the stage is cleared only once this device ID's protocol state
+        // reads back. Manual credentials never initialize it.
         bool prepareState()
         {
-            const char *deviceId = replacement.deviceId.c_str();
-            const bool ready = initializeState ? deviceState.initializeIdentity(deviceId)
-                                               : deviceState.identityReady(deviceId);
+            const bool ready = deviceState.identityReady(replacement.deviceId.c_str());
             deviceState.end();
             return ready;
         }
         bool clearStage() { return store.clearCliStaged(); }
-    } operations = {_store, _deviceState, replacement, initializeState, NivaloRuntimeCredentials()};
+    } operations = {_store, _deviceState, replacement, NivaloRuntimeCredentials()};
 
     if (!replacement.valid()) return false;
     const bool completed = stageFirst
@@ -798,6 +856,13 @@ bool NivaloProvisioning::prepareClaimedState(const String &deviceId)
     const bool prepared = _deviceState.initializeIdentity(deviceId.c_str());
     _deviceState.end();
     return prepared;
+}
+
+bool NivaloProvisioning::protocolStateReady(const String &deviceId)
+{
+    const bool ready = _deviceState.identityReady(deviceId.c_str());
+    _deviceState.end();
+    return ready;
 }
 
 bool NivaloProvisioning::loadSetupCode(char code[17])
@@ -933,8 +998,12 @@ void NivaloProvisioning::startPortal(bool keepStation)
         WiFi.mode(WIFI_AP);
     }
     String ap = String(_config.softApPrefix) + "-" + hardwareId().substring(hardwareId().length() - 6U);
-    const bool apStarted = WiFi.softAP(ap.c_str(), setupCode, 1, 0, 1);
+    bool apStarted = WiFi.softAP(ap.c_str(), setupCode, 1, 0, 1);
     memset(setupCode, 0, sizeof(setupCode));
+    // The HTTP server is bound to this address, so the access point must use it.
+    const IPAddress address = setupNetworkAddress();
+    if (apStarted && WiFi.softAPIP() != address)
+        apStarted = WiFi.softAPConfig(address, address, IPAddress(255, 255, 255, 0)) && WiFi.softAPIP() == address;
     if (!apStarted)
     {
         // Leave no access point behind in an earlier configuration.
@@ -944,7 +1013,15 @@ void NivaloProvisioning::startPortal(bool keepStation)
         _stateStartedAt = millis();
         return;
     }
-    _dns.start(53, "*", WiFi.softAPIP());
+    // Captive DNS only while the station is off: its responder binds every interface, so in
+    // AP+STA it would also answer on the station's LAN. The outage portal is reached directly at
+    // http://192.168.4.1.
+    if (_dnsRunning)
+    {
+        _dns.stop();
+        _dnsRunning = false;
+    }
+    if (!keepStation) _dnsRunning = _dns.start(53, "*", address);
     if (!_webRoutes)
     {
         _web.on("/", HTTP_GET, [this]() { handlePortalRoot(); });
@@ -960,15 +1037,36 @@ void NivaloProvisioning::startPortal(bool keepStation)
 }
 void NivaloProvisioning::stopPortal()
 {
-    if (_portalRunning) { _dns.stop(); _web.stop(); _portalRunning = false; }
+    if (_dnsRunning) { _dns.stop(); _dnsRunning = false; }
+    if (_portalRunning) { _web.stop(); _portalRunning = false; }
     // Always: stops the access point and disconnects its stations, whatever started it.
     WiFi.softAPdisconnect(true);
+}
+
+bool NivaloProvisioning::fromSetupNetwork()
+{
+    // A station of the setup access point only. The server listens on the access point's address;
+    // in AP+STA a LAN client could still route to that address through the station interface, so
+    // the client must also come from the access point's own subnet (a forged source address
+    // cannot complete the TCP handshake: the reply goes out on the access point).
+    WiFiClient client = _web.client();
+    const uint32_t ap = WiFi.softAPIP();
+    const uint32_t mask = WiFi.softAPSubnetMask();
+    const uint32_t local = client.localIP();
+    const uint32_t remote = client.remoteIP();
+    return ap != 0U && mask != 0U && local == ap && remote != ap && (remote & mask) == (ap & mask);
 }
 void NivaloProvisioning::enterSetupMode() { _outagePortal = false; _changingWifiOnly = _credentials.valid(); startPortal(); }
 bool NivaloProvisioning::factoryReset() { bool ok = _store.clear(); _credentials = NivaloRuntimeCredentials(); _outagePortal = false; _changingWifiOnly = false; startPortal(); return ok; }
 
+void NivaloProvisioning::refuseOffSetupNetwork()
+{
+    _web.send(403, "text/plain", "Setup is available only on the setup access point");
+}
+
 void NivaloProvisioning::handlePortalRoot()
 {
+    if (!fromSetupNetwork()) { refuseOffSetupNetwork(); return; }
     const char page[] = "<!doctype html><meta name=viewport content='width=device-width'><h1>Nivalo setup</h1>"
         "<form method=post action=/configure><label>Wi-Fi SSID<input name=ssid maxlength=32 required></label>"
         "<label>Wi-Fi password<input name=wifi type=password maxlength=63></label>"
@@ -977,6 +1075,8 @@ void NivaloProvisioning::handlePortalRoot()
 }
 void NivaloProvisioning::handlePortalSubmit()
 {
+    // Configuration is accepted only from the setup access point, never from the station side.
+    if (!fromSetupNetwork()) { refuseOffSetupNetwork(); return; }
     String ssid = _web.arg("ssid"), password = _web.arg("wifi"), claim = _web.arg("claim"); claim.toUpperCase();
     if (ssid.length() == 0U || ssid.length() > 32U || password.length() > 63U ||
         (_changingWifiOnly ? claim.length() != 0U :
@@ -1006,7 +1106,10 @@ void NivaloProvisioning::handlePortalSubmit()
     if (!_changingWifiOnly) { _claimFailures = 0U; _claimRetryAt = 0U; }
     _web.send(202, "text/plain", "Connecting; this setup network will close."); startWifi(ssid, password);
 }
-void NivaloProvisioning::handleNotFound() { _web.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); _web.send(302, "text/plain", ""); }
+void NivaloProvisioning::handleNotFound()
+{
+    if (!fromSetupNetwork()) { refuseOffSetupNetwork(); return; }
+    _web.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true); _web.send(302, "text/plain", ""); }
 
 String NivaloProvisioning::hardwareId() const
 {
@@ -1086,46 +1189,6 @@ private:
     bool _overflow = false;
 };
 
-const size_t MaxClaimResponseBytes = 3072U;
-
-// clientId and username: the exact issued values, printable ASCII without space, 1-128 bytes.
-bool issuedIdentity(JsonVariantConst value)
-{
-    if (!value.is<const char *>()) return false;
-    const char *text = value.as<const char *>();
-    const size_t length = strlen(text);
-    if (length < 1U || length > 128U) return false;
-    for (size_t i = 0U; i < length; i++)
-        if (text[i] < '!' || text[i] > '~') return false;
-    return true;
-}
-
-// The device-claim-response schema, checked whole before anything is probed or promoted.
-bool validClaimResponse(JsonVariantConst response)
-{
-    static const char *const MqttMembers[] = {"host", "port", "useTls", "clientId", "username", "caCertificatePem"};
-    if (!response.is<JsonObjectConst>()) return false;
-    JsonObjectConst root = response.as<JsonObjectConst>();
-    if (root.size() != 2U || !root.containsKey("deviceId") || !root["mqtt"].is<JsonObjectConst>() ||
-        !root["deviceId"].is<const char *>() || !nivaloIsUuid(root["deviceId"].as<const char *>()))
-        return false;
-    JsonObjectConst mqtt = root["mqtt"].as<JsonObjectConst>();
-    for (JsonPairConst member : mqtt)
-    {
-        bool known = false;
-        for (const char *name : MqttMembers) known = known || strcmp(member.key().c_str(), name) == 0;
-        if (!known) return false;
-    }
-    JsonVariantConst host = mqtt["host"];
-    JsonVariantConst ca = mqtt["caCertificatePem"];
-    return host.is<const char *>() &&
-           NivaloCliProvisioningPolicy::isMqttHost(host.as<const char *>(), strlen(host.as<const char *>())) &&
-           mqtt["port"].is<int>() && (mqtt["port"].as<int>() == 8883 || mqtt["port"].as<int>() == 8884) &&
-           mqtt["useTls"].is<bool>() && mqtt["useTls"].as<bool>() && issuedIdentity(mqtt["clientId"]) &&
-           issuedIdentity(mqtt["username"]) &&
-           (!mqtt.containsKey("caCertificatePem") || ca.isNull() ||
-            (ca.is<const char *>() && strlen(ca.as<const char *>()) <= 2048U));
-}
 } // namespace
 
 bool NivaloProvisioning::exchangeClaim()
@@ -1143,26 +1206,25 @@ bool NivaloProvisioning::exchangeClaim()
     HTTPClient http; http.setConnectTimeout(5000); http.setTimeout(5000); http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
     if (!http.begin(tls, _config.claimUrl)) { _lastError="Claim HTTPS setup failed"; return false; }
     http.addHeader("Content-Type", "application/json"); int status=http.POST((uint8_t*)body.c_str(), body.length()); body="";
-    if ((status != 200 && status != 201) || http.getSize() > (int)MaxClaimResponseBytes)
+    const size_t capacity = NivaloClaimResponse::MaxBytes;
+    if ((status != 200 && status != 201) || http.getSize() > (int)capacity)
     { http.end(); _lastError="Claim exchange rejected"; return false; }
-    char *response = new (std::nothrow) char[MaxClaimResponseBytes + 1U];
+    char *response = new (std::nothrow) char[capacity + 1U];
     if (response == NULL) { http.end(); _lastError="Claim response buffer unavailable"; return false; }
-    BoundedSink sink(response, MaxClaimResponseBytes);
+    BoundedSink sink(response, capacity);
     const int read = http.writeToStream(&sink);
     http.end();
     const size_t length = sink.length();
     response[length] = '\0';
-    DynamicJsonDocument doc(4096);
-    const bool parsed = read >= 0 && !sink.overflow() && length > 0U &&
-                        nivaloScanJson(response, length, 4U, 32U, NULL) == NIVALO_JSON_OK &&
-                        deserializeJson(doc, response, length) == DeserializationError::Ok;
-    memset(response, 0, MaxClaimResponseBytes + 1U);
+    // parse() copies every string out of the buffer, which is wiped and freed straight after.
+    NivaloClaimResponse claim;
+    const bool parsed = read >= 0 && !sink.overflow() && claim.parse(response, length);
+    memset(response, 0, capacity + 1U);
     delete[] response;
-    if (!parsed || !validClaimResponse(doc.as<JsonVariantConst>()))
-    { _lastError="Claim response invalid"; return false; }
-    _pending.deviceId=doc["deviceId"]|""; _pending.mqttHost=doc["mqtt"]["host"]|""; _pending.mqttPort=doc["mqtt"]["port"]|0;
-    _pending.mqttClientId=doc["mqtt"]["clientId"]|""; _pending.mqttUsername=doc["mqtt"]["username"]|"";
-    _pending.mqttPassword=_claimAttempt.mqttCredential; _pending.mqttCaCertificate=doc["mqtt"]["caCertificatePem"]|"";
+    if (!parsed) { _lastError="Claim response invalid"; return false; }
+    _pending.deviceId=claim.deviceId(); _pending.mqttHost=claim.mqttHost(); _pending.mqttPort=claim.mqttPort();
+    _pending.mqttClientId=claim.mqttClientId(); _pending.mqttUsername=claim.mqttUsername();
+    _pending.mqttPassword=_claimAttempt.mqttCredential; _pending.mqttCaCertificate=claim.mqttCaCertificate();
     _pending.devicePrivateKeyPem=_claimAttempt.privateKeyPem;
     if (!sha256Text(_claimAttempt.claimCode, _pending.claimCodeSha256))
     {

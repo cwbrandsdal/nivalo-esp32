@@ -6,6 +6,8 @@ namespace
 {
 // Retry interval for a capability refresh that did not complete.
 static constexpr int64_t CatalogRetryUs = 30LL * 1000000LL;
+// Retry interval for a boot reconciliation whose pending record or floor could not be read.
+static constexpr int64_t ReconcileRetryUs = 10LL * 1000000LL;
 
 // Guards the asynchronous completion mailbox: completeFunction() may run on any task.
 portMUX_TYPE completionLock = portMUX_INITIALIZER_UNLOCKED;
@@ -118,6 +120,25 @@ void NivaloDevice::serviceCompletion()
     drainAcks();
 }
 
+// --- Boot reconciliation -------------------------------------------------------------------------
+
+void NivaloDevice::serviceReconciliation()
+{
+    if (!_executor.reconciling() || monotonicUs() < _reconcileRetryAtUs)
+    {
+        return;
+    }
+    _reconcileRetryAtUs = monotonicUs() + ReconcileRetryUs;
+    _executor.retryReconciliation();
+    if (!_executor.reconciling())
+    {
+        Serial.println("Nivalo: interrupted OTA reconciled");
+        // The terminal result goes out now rather than with the next heartbeat.
+        _executor.republishResult();
+        drainAcks();
+    }
+}
+
 // --- Capability catalog --------------------------------------------------------------------------
 
 bool NivaloDevice::sealCatalog()
@@ -126,16 +147,16 @@ bool NivaloDevice::sealCatalog()
     {
         return _catalogReady;
     }
-    if (_catalogRead == NIVALO_STORE_CORRUPT)
+    if (_catalogRead != NIVALO_STORE_OK && _catalogRead != NIVALO_STORE_MISSING)
     {
-        // Unreadable is not a first enrollment: read again, never write over it.
+        // Damaged or unreadable is not a first enrollment: read again, never write over it.
         NivaloCatalogState stored;
         _catalogRead = _store.loadCatalog(&stored);
         if (_catalogRead == NIVALO_STORE_OK)
         {
             _catalog = stored;
         }
-        else if (_catalogRead == NIVALO_STORE_CORRUPT)
+        else if (_catalogRead != NIVALO_STORE_MISSING)
         {
             Serial.println("Nivalo: stored capability catalog unreadable; refresh deferred");
             return false;
@@ -228,21 +249,40 @@ bool NivaloDevice::Platform::prepareFunction(const NivaloOperation &operation)
     return true;
 }
 
-NivaloFunctionOutcome NivaloDevice::Platform::invokePrepared(uint32_t token)
+bool NivaloDevice::Platform::armPrepared(uint32_t token)
 {
     const NivaloRegisteredFunction *function = _device._preparedFunction;
-    if (function == NULL || !_device._prepared.ready())
+    if (function == NULL || function->handler == NULL || !_device._prepared.ready())
     {
-        // The claim is durable already; nothing ran, so this is a known zero-effect failure.
-        return NIVALO_FUNCTION_FAILED;
+        return false;
     }
+    _device._armedHandler = function->handler;
+    _device._armedArguments = _device._prepared.object();
     // Completions for this invocation are accepted from now on, also from a task the handler
-    // starts before it returns.
+    // starts before it returns. The lock is taken here, before the executor's final clock
+    // reading, never between that reading and the handler call.
     portENTER_CRITICAL(&completionLock);
     _device._completionToken = token;
     _device._completionQueued = false;
     portEXIT_CRITICAL(&completionLock);
-    const NivaloFunctionOutcome outcome = function->handler(_device._prepared.object());
+    return true;
+}
+
+void NivaloDevice::Platform::disarmPrepared()
+{
+    // The final reading rejected the operation: no completion for its token is accepted.
+    portENTER_CRITICAL(&completionLock);
+    _device._completionToken = 0U;
+    _device._completionQueued = false;
+    portEXIT_CRITICAL(&completionLock);
+    _device._armedHandler = NULL;
+}
+
+NivaloFunctionOutcome NivaloDevice::Platform::invokePrepared()
+{
+    // The handler call is the first thing here: it directly follows the final clock reading.
+    const NivaloFunctionOutcome outcome = _device._armedHandler(_device._armedArguments);
+    _device._armedHandler = NULL;
     if (outcome != NIVALO_FUNCTION_PENDING)
     {
         // A synchronous result is final; anything queued for this token is dropped.
@@ -258,6 +298,8 @@ void NivaloDevice::Platform::releasePrepared()
 {
     _device._prepared.release();
     _device._preparedFunction = NULL;
+    _device._armedHandler = NULL;
+    _device._armedArguments = JsonObjectConst();
 }
 
 NivaloRefreshOutcome NivaloDevice::Platform::refreshCatalog()

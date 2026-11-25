@@ -350,31 +350,27 @@ boolean NivaloDevice::beginMqtt(const NivaloMqttConfig &config)
     _ota.keyCount = config.firmwareSigningKeyCount;
     _ota.productId = running.productId;
     _ota.runningSecurityVersion = running.securityVersion;
-    uint32_t floor = 0U;
-    const NivaloStoreRead floorRead = _store.loadFloor(running.productId, &floor);
-    _ota.committedFloor = floor;
-    _ota.floorReadable = floorRead != NIVALO_STORE_CORRUPT;
+    _ota.maxImageBytes = inactive == NULL ? 0U : inactive->size;
+    _ota.apiOrigin = config.apiOrigin == NULL ? NULL : _apiOrigin.c_str();
+
+    // Reconcile a claimed operation before connecting (section 11.4 step 4). The executor reads
+    // the committed floor and the pending record itself; a pending record is cleared only once no
+    // claim depends on it.
+    NivaloJournal journal;
+    const NivaloStoreRead journalRead = _store.loadJournal(&journal);
+    _executor.begin(_deviceId.c_str(), journalRead == NIVALO_STORE_OK ? &journal : NULL, &_ota, running);
+    _reconcileRetryAtUs = monotonicUs();
     if (!_ota.floorReadable)
     {
         Serial.println("Nivalo: committed OTA floor unreadable; OTA is disabled and the record is kept");
     }
-    _ota.maxImageBytes = inactive == NULL ? 0U : inactive->size;
-    _ota.apiOrigin = config.apiOrigin == NULL ? NULL : _apiOrigin.c_str();
-
-    // Reconcile a claimed operation before connecting (section 11.4 step 4).
-    NivaloJournal journal;
-    const NivaloStoreRead journalRead = _store.loadJournal(&journal);
-    NivaloPendingRecord pending;
-    const NivaloStoreRead pendingRead = _store.loadPending(&pending);
-    if (pendingRead == NIVALO_STORE_CORRUPT)
-    {
-        (void)_store.clearPending();
-    }
-    _executor.begin(_deviceId.c_str(), journalRead == NIVALO_STORE_OK ? &journal : NULL,
-                    pendingRead == NIVALO_STORE_OK ? &pending : NULL, &_ota, running);
     if (_executor.blocked())
     {
         Serial.println("Nivalo: command journal missing or unusable; commands are refused until re-claimed");
+    }
+    else if (_executor.reconciling())
+    {
+        Serial.println("Nivalo: interrupted OTA cannot be reconciled yet (record unreadable); retrying");
     }
     NivaloCatalogState catalog;
     _catalogReady = false;

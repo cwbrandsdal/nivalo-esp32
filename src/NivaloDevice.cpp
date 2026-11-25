@@ -64,6 +64,7 @@ void NivaloDevice::loop()
         _statusPixel.set(255, 0, 0);
     }
     serviceCompletion();
+    serviceReconciliation();
     processInbox();
     drainAcks();
     serviceHeartbeat();

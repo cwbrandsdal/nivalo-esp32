@@ -11,13 +11,23 @@ const char JournalKey[] = "journal";
 const char PendingKey[] = "otaPending";
 const char FloorKey[] = "otaFloor";
 const char CatalogKey[] = "catalog";
+
+NivaloStoreRead readStatus(esp_err_t error)
+{
+    if (error == ESP_OK)
+    {
+        return NIVALO_STORE_OK;
+    }
+    // Only a genuine "not found" is absence; a failed lookup is not.
+    return error == ESP_ERR_NVS_NOT_FOUND ? NIVALO_STORE_MISSING : NIVALO_STORE_UNREADABLE;
+}
 } // namespace
 
 bool NivaloDeviceStore::begin()
 {
     if (!_opened)
     {
-        _opened = _preferences.begin(Namespace, false);
+        _opened = nvs_open(Namespace, NVS_READWRITE, &_handle) == ESP_OK;
     }
     return _opened;
 }
@@ -26,9 +36,14 @@ void NivaloDeviceStore::end()
 {
     if (_opened)
     {
-        _preferences.end();
+        nvs_close(_handle);
         _opened = false;
     }
+}
+
+bool NivaloDeviceStore::commit()
+{
+    return nvs_commit(_handle) == ESP_OK;
 }
 
 bool NivaloDeviceStore::writeBlob(const char *key, const uint8_t *data, size_t length)
@@ -37,7 +52,7 @@ bool NivaloDeviceStore::writeBlob(const char *key, const uint8_t *data, size_t l
     {
         return false;
     }
-    if (_preferences.putBytes(key, data, length) != length)
+    if (nvs_set_blob(_handle, key, data, length) != ESP_OK || !commit())
     {
         return false;
     }
@@ -46,55 +61,72 @@ bool NivaloDeviceStore::writeBlob(const char *key, const uint8_t *data, size_t l
     {
         return false;
     }
-    const bool same = _preferences.getBytesLength(key) == length && _preferences.getBytes(key, check, length) == length &&
+    size_t stored = 0U;
+    const bool same = readBlob(key, check, length, &stored) == NIVALO_STORE_OK && stored == length &&
                       memcmp(check, data, length) == 0;
     delete[] check;
     return same;
 }
 
-size_t NivaloDeviceStore::readBlob(const char *key, uint8_t *data, size_t capacity, bool *present)
+NivaloStoreRead NivaloDeviceStore::readBlob(const char *key, uint8_t *data, size_t capacity, size_t *length)
 {
-    *present = _opened && _preferences.isKey(key);
-    if (!*present)
+    *length = 0U;
+    if (!_opened)
     {
-        return 0U;
+        return NIVALO_STORE_UNREADABLE;
     }
-    const size_t length = _preferences.getBytesLength(key);
-    if (length == 0U || length > capacity)
+    size_t stored = 0U;
+    const NivaloStoreRead lookup = readStatus(nvs_get_blob(_handle, key, NULL, &stored));
+    if (lookup != NIVALO_STORE_OK)
     {
-        return 0U;
+        return lookup;
     }
-    return _preferences.getBytes(key, data, length);
+    if (stored == 0U || stored > capacity)
+    {
+        return NIVALO_STORE_CORRUPT;
+    }
+    size_t read = stored;
+    const esp_err_t error = nvs_get_blob(_handle, key, data, &read);
+    if (error != ESP_OK || read != stored)
+    {
+        // The key was found a moment ago: a failed data read is never absence.
+        return NIVALO_STORE_UNREADABLE;
+    }
+    *length = read;
+    return NIVALO_STORE_OK;
 }
 
 NivaloStoreRead NivaloDeviceStore::loadBoot(uint32_t *boot)
 {
     if (!_opened || boot == NULL)
     {
-        return NIVALO_STORE_CORRUPT;
+        return NIVALO_STORE_UNREADABLE;
     }
-    if (!_preferences.isKey(BootKey))
+    uint32_t value = 0U;
+    const NivaloStoreRead read = readStatus(nvs_get_u32(_handle, BootKey, &value));
+    if (read != NIVALO_STORE_OK)
     {
-        return NIVALO_STORE_MISSING;
+        return read;
     }
-    *boot = _preferences.getULong(BootKey, 0xFFFFFFFFUL);
-    return *boot == 0xFFFFFFFFUL ? NIVALO_STORE_CORRUPT : NIVALO_STORE_OK;
+    *boot = value;
+    return value == 0xFFFFFFFFUL ? NIVALO_STORE_CORRUPT : NIVALO_STORE_OK;
 }
 
 bool NivaloDeviceStore::writeBoot(uint32_t boot)
 {
-    return _opened && _preferences.putULong(BootKey, boot) == sizeof(uint32_t) &&
-           _preferences.getULong(BootKey, boot + 1U) == boot;
+    uint32_t check = boot + 1U;
+    return _opened && nvs_set_u32(_handle, BootKey, boot) == ESP_OK && commit() &&
+           nvs_get_u32(_handle, BootKey, &check) == ESP_OK && check == boot;
 }
 
 NivaloStoreRead NivaloDeviceStore::loadJournal(NivaloJournal *journal)
 {
     uint8_t blob[NivaloJournalBlobBytes];
-    bool present = false;
-    const size_t length = readBlob(JournalKey, blob, sizeof(blob), &present);
-    if (!present)
+    size_t length = 0U;
+    const NivaloStoreRead read = readBlob(JournalKey, blob, sizeof(blob), &length);
+    if (read != NIVALO_STORE_OK)
     {
-        return _opened ? NIVALO_STORE_MISSING : NIVALO_STORE_CORRUPT;
+        return read;
     }
     return nivaloDecodeJournal(blob, length, journal) ? NIVALO_STORE_OK : NIVALO_STORE_CORRUPT;
 }
@@ -109,11 +141,11 @@ bool NivaloDeviceStore::writeJournal(const NivaloJournal &journal)
 NivaloStoreRead NivaloDeviceStore::loadPending(NivaloPendingRecord *pending)
 {
     uint8_t blob[NivaloPendingBlobBytes];
-    bool present = false;
-    const size_t length = readBlob(PendingKey, blob, sizeof(blob), &present);
-    if (!present)
+    size_t length = 0U;
+    const NivaloStoreRead read = readBlob(PendingKey, blob, sizeof(blob), &length);
+    if (read != NIVALO_STORE_OK)
     {
-        return NIVALO_STORE_MISSING;
+        return read;
     }
     return nivaloDecodePending(blob, length, pending) ? NIVALO_STORE_OK : NIVALO_STORE_CORRUPT;
 }
@@ -131,22 +163,24 @@ bool NivaloDeviceStore::clearPending()
     {
         return false;
     }
-    if (_preferences.isKey(PendingKey))
+    const esp_err_t erased = nvs_erase_key(_handle, PendingKey);
+    if ((erased != ESP_OK && erased != ESP_ERR_NVS_NOT_FOUND) || !commit())
     {
-        _preferences.remove(PendingKey);
+        return false;
     }
-    return !_preferences.isKey(PendingKey);
+    size_t length = 0U;
+    return nvs_get_blob(_handle, PendingKey, NULL, &length) == ESP_ERR_NVS_NOT_FOUND;
 }
 
 NivaloStoreRead NivaloDeviceStore::loadFloor(const char *productId, uint32_t *floor)
 {
     *floor = 0U;
     uint8_t blob[NivaloFloorBlobBytes];
-    bool present = false;
-    const size_t length = readBlob(FloorKey, blob, sizeof(blob), &present);
-    if (!present)
+    size_t length = 0U;
+    const NivaloStoreRead read = readBlob(FloorKey, blob, sizeof(blob), &length);
+    if (read != NIVALO_STORE_OK)
     {
-        return _opened ? NIVALO_STORE_MISSING : NIVALO_STORE_CORRUPT;
+        return read;
     }
     NivaloFloorRecord record;
     if (!nivaloDecodeFloor(blob, length, &record))
@@ -181,14 +215,13 @@ NivaloStoreRead NivaloDeviceStore::loadCatalog(NivaloCatalogState *state)
     uint8_t *blob = new (std::nothrow) uint8_t[NivaloCatalogBlobBytes];
     if (blob == NULL)
     {
-        return NIVALO_STORE_CORRUPT;
+        return NIVALO_STORE_UNREADABLE;
     }
-    bool present = false;
-    const size_t length = readBlob(CatalogKey, blob, NivaloCatalogBlobBytes, &present);
-    NivaloStoreRead result = NIVALO_STORE_MISSING;
-    if (present)
+    size_t length = 0U;
+    NivaloStoreRead result = readBlob(CatalogKey, blob, NivaloCatalogBlobBytes, &length);
+    if (result == NIVALO_STORE_OK && !nivaloDecodeCatalog(blob, length, state))
     {
-        result = nivaloDecodeCatalog(blob, length, state) ? NIVALO_STORE_OK : NIVALO_STORE_CORRUPT;
+        result = NIVALO_STORE_CORRUPT;
     }
     delete[] blob;
     return result;
@@ -207,7 +240,7 @@ bool NivaloDeviceStore::writeCatalog(const NivaloCatalogState &state)
     return written;
 }
 
-NivaloIdentityAdmission NivaloDeviceStore::admitIdentity(const char *deviceId, bool hasActiveIdentity)
+NivaloIdentityAdmission NivaloDeviceStore::admit(const char *deviceId, bool allowFirstEnrollment)
 {
     if (!begin() || !nivaloIsUuid(deviceId))
     {
@@ -223,13 +256,23 @@ NivaloIdentityAdmission NivaloDeviceStore::admitIdentity(const char *deviceId, b
         // and reseeding it could repeat presence epochs.
         return bootRead == NIVALO_STORE_OK ? NIVALO_IDENTITY_KEEP : NIVALO_IDENTITY_REFUSED;
     }
-    if (!hasActiveIdentity && journalRead == NIVALO_STORE_MISSING && bootRead == NIVALO_STORE_MISSING)
+    if (allowFirstEnrollment && journalRead == NIVALO_STORE_MISSING && bootRead == NIVALO_STORE_MISSING)
     {
         return NIVALO_IDENTITY_FIRST_ENROLLMENT;
     }
-    // Lost records of an identity that exists, or another device ID's history: manually supplied
-    // credentials cannot prove that this device ID never executed anything on this unit.
+    // Lost or unreadable records, or another device ID's history: manually supplied credentials
+    // cannot prove that this device ID never executed anything.
     return NIVALO_IDENTITY_REFUSED;
+}
+
+NivaloIdentityAdmission NivaloDeviceStore::admitManualCredentials(const char *deviceId)
+{
+    return admit(deviceId, false);
+}
+
+NivaloIdentityAdmission NivaloDeviceStore::admitDeveloperFixture(const char *deviceId)
+{
+    return admit(deviceId, true);
 }
 
 bool NivaloDeviceStore::initializeIdentity(const char *deviceId)
@@ -238,14 +281,21 @@ bool NivaloDeviceStore::initializeIdentity(const char *deviceId)
     {
         return false;
     }
+    // A record whose read failed is never written over: it may read back on a later attempt.
     NivaloJournal journal;
-    const bool keep = loadJournal(&journal) == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0;
+    const NivaloStoreRead journalRead = loadJournal(&journal);
+    uint32_t boot = 0U;
+    const NivaloStoreRead bootRead = loadBoot(&boot);
+    if (journalRead == NIVALO_STORE_UNREADABLE || bootRead == NIVALO_STORE_UNREADABLE)
+    {
+        return false;
+    }
+    const bool keep = journalRead == NIVALO_STORE_OK && strcmp(journal.deviceId, deviceId) == 0;
     if (!keep && !writeJournal(nivaloFreshJournal(deviceId)))
     {
         return false;
     }
-    uint32_t boot = 0U;
-    if (loadBoot(&boot) != NIVALO_STORE_OK && !writeBoot(0U))
+    if (bootRead != NIVALO_STORE_OK && !writeBoot(0U))
     {
         return false;
     }

@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <new>
+#include <stdlib.h>
 #include <string.h>
 
 namespace
@@ -78,16 +79,21 @@ bool nonzeroMantissa(const char *token, size_t length)
     return false;
 }
 
-bool representable(JsonVariantConst value, NumberTokens &tokens)
+// Checks every value and gives each non-integer number the correctly rounded binary64 value of
+// its original token. ArduinoJson 6.21's own decimal conversion is not correctly rounded: the
+// exact decimal of 1 + 2^-52 parses as 1, 1000000000000000.5 as 1000000000000000 and
+// 18446744073709551616.0 as ten times its value, so a validator could pass a value the sender
+// never meant.
+bool representable(JsonVariant value, NumberTokens &tokens)
 {
     if (value.isNull())
     {
         // Command arguments contain no null at any depth (section 3).
         return false;
     }
-    if (value.is<JsonObjectConst>())
+    if (value.is<JsonObject>())
     {
-        for (JsonPairConst member : value.as<JsonObjectConst>())
+        for (JsonPair member : value.as<JsonObject>())
         {
             if (!representable(member.value(), tokens))
             {
@@ -96,9 +102,9 @@ bool representable(JsonVariantConst value, NumberTokens &tokens)
         }
         return true;
     }
-    if (value.is<JsonArrayConst>())
+    if (value.is<JsonArray>())
     {
-        for (JsonVariantConst item : value.as<JsonArrayConst>())
+        for (JsonVariant item : value.as<JsonArray>())
         {
             if (!representable(item, tokens))
             {
@@ -120,12 +126,19 @@ bool representable(JsonVariantConst value, NumberTokens &tokens)
     }
     if (integerForm(token, length))
     {
-        // ArduinoJson keeps an integer token that fits 64 bits as an integer; a larger one would
-        // become an approximate float.
+        // ArduinoJson keeps an integer token that fits 64 bits as an integer (exact); a larger one
+        // would become an approximate float.
         return value.is<int64_t>() || value.is<uint64_t>();
     }
-    const double number = value.as<double>();
-    return isfinite(number) && (number != 0.0 || !nonzeroMantissa(token, length));
+    // The token lies inside the arguments object, so a delimiter follows it and strtod() stops
+    // there; it must consume exactly the token.
+    char *end = NULL;
+    const double number = strtod(token, &end);
+    if (end != token + length || !isfinite(number) || (number == 0.0 && nonzeroMantissa(token, length)))
+    {
+        return false;
+    }
+    return value.set(number);
 }
 } // namespace
 
@@ -147,7 +160,7 @@ bool NivaloPreparedArguments::prepare(const char *bytes, size_t length)
     // Read-only input: ArduinoJson copies the strings into the document.
     const bool parsed = document->capacity() > 0U &&
                         deserializeJson(*document, bytes, length) == DeserializationError::Ok &&
-                        document->is<JsonObject>() && representable(document->as<JsonVariantConst>(), tokens) &&
+                        document->is<JsonObject>() && representable(document->as<JsonVariant>(), tokens) &&
                         !tokens.next(&unused, &unusedLength);
     if (!parsed)
     {

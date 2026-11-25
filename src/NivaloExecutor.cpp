@@ -57,54 +57,138 @@ uint32_t NivaloExecutor::nextToken()
     return _lastToken;
 }
 
-void NivaloExecutor::begin(const char *deviceId, const NivaloJournal *journal, const NivaloPendingRecord *pending,
-                           NivaloOtaDevice *ota, const NivaloImageIdentity &runningImage)
+void NivaloExecutor::begin(const char *deviceId, const NivaloJournal *journal, NivaloOtaDevice *ota,
+                           const NivaloImageIdentity &runningImage)
 {
     _ota = ota;
+    _runningImage = runningImage;
     _busy = false;
     _token = 0U;
     _deadline.stop();
-    _hasPending = pending != NULL;
-    if (pending != NULL)
-    {
-        _pending = *pending;
-    }
+    _reconcile = RECONCILE_NONE;
+    _imageVerdict = IMAGE_UNCHECKED;
+    readFloor();
+    readPending();
     if (journal == NULL || deviceId == NULL || strcmp(journal->deviceId, deviceId) != 0)
     {
+        // Whatever pending record exists stays as it is.
         _journal = NivaloJournal();
         _blocked = true;
         return;
     }
     _journal = *journal;
     _blocked = false;
+    reconcile();
+}
 
+void NivaloExecutor::readPending()
+{
+    NivaloPendingRecord pending;
+    _pendingRead = _platform.readPending(&pending);
+    _hasPending = _pendingRead != NIVALO_STORE_MISSING;
+    if (_pendingRead == NIVALO_STORE_OK)
+    {
+        _pending = pending;
+    }
+}
+
+void NivaloExecutor::readFloor()
+{
+    if (_ota == NULL)
+    {
+        return;
+    }
+    uint32_t floor = 0U;
+    const NivaloStoreRead read = _platform.readFloor(&floor);
+    // Damaged or unreadable: no security version can be judged against it, so OTA stays off and
+    // the record is left for recovery.
+    _ota->floorReadable = read == NIVALO_STORE_OK || read == NIVALO_STORE_MISSING;
+    _ota->committedFloor = read == NIVALO_STORE_OK ? floor : 0U;
+}
+
+void NivaloExecutor::retryReconciliation()
+{
+    if (_blocked || _reconcile == RECONCILE_NONE)
+    {
+        return;
+    }
+    if (_reconcile == RECONCILE_PENDING)
+    {
+        readPending();
+    }
+    else
+    {
+        readFloor();
+    }
+    reconcile();
+}
+
+void NivaloExecutor::waitFor(Reconcile stage)
+{
+    // The claim and its pending record stay as they are. Busy: the same operation is answered as
+    // running, higher sequences are not consumed, nothing new starts.
+    _reconcile = stage;
+    _busy = true;
+}
+
+bool NivaloExecutor::runningImageIsPending()
+{
+    if (_imageVerdict == IMAGE_UNCHECKED)
+    {
+        char slotSha256[65] = {0};
+        const bool hashed = _platform.hashRunningSlot(_pending.sizeBytes, slotSha256);
+        _imageVerdict =
+            nivaloImageMatchesPending(_runningImage, hashed ? slotSha256 : NULL, _pending) ? IMAGE_MATCHES : IMAGE_DIFFERS;
+    }
+    return _imageVerdict == IMAGE_MATCHES;
+}
+
+bool NivaloExecutor::commitFloor()
+{
+    if (_ota != NULL && !_ota->floorReadable)
+    {
+        // Success is never journaled over an unknown floor: once the pending record is gone, a
+        // later slot fallback would find the old floor and accept a version below this one.
+        waitFor(RECONCILE_FLOOR);
+        return false;
+    }
+    const uint32_t floor =
+        _ota != NULL && _ota->committedFloor > _pending.securityVersion ? _ota->committedFloor : _pending.securityVersion;
+    // writeFloor() reads the record back: the floor is durable when it returns true.
+    if (!_platform.writeFloor(floor))
+    {
+        _blocked = true;
+        return false;
+    }
+    if (_ota != NULL)
+    {
+        _ota->committedFloor = floor;
+    }
+    return true;
+}
+
+void NivaloExecutor::reconcile()
+{
+    _reconcile = RECONCILE_NONE;
+    _busy = false;
     if (_journal.hasLast && _journal.phase == NIVALO_PHASE_CLAIMED)
     {
         NivaloResult result = nivaloResult(NIVALO_ACK_INDETERMINATE, NIVALO_CODE_EXECUTION_UNKNOWN);
-        if (_journal.operationClass == NIVALO_OPERATION_OTA && _hasPending && _pending.commandSeq == _journal.seq)
+        if (_journal.operationClass == NIVALO_OPERATION_OTA)
         {
-            char slotSha256[65] = {0};
-            const bool hashed = _platform.hashRunningSlot(_pending.sizeBytes, slotSha256);
-            if (nivaloImageMatchesPending(runningImage, hashed ? slotSha256 : NULL, _pending))
+            if (_pendingRead == NIVALO_STORE_UNREADABLE)
+            {
+                // Possibly the record of the image now running: decide once it can be read.
+                waitFor(RECONCILE_PENDING);
+                return;
+            }
+            if (_pendingRead == NIVALO_STORE_OK && _pending.commandSeq == _journal.seq && runningImageIsPending())
             {
                 // Floor, then result, then clear: each write is idempotent, so a reset in between
-                // repeats this step at the next boot. An unreadable floor record is left as it is
-                // for recovery (OTA stays disabled); the new image's own security version then
-                // protects it.
-                if (_ota == NULL || _ota->floorReadable)
+                // repeats this step at the next boot.
+                if (!commitFloor())
                 {
-                    const uint32_t floor = _ota != NULL && _ota->committedFloor > _pending.securityVersion
-                                               ? _ota->committedFloor
-                                               : _pending.securityVersion;
-                    if (!_platform.writeFloor(floor))
-                    {
-                        _blocked = true;
-                        return;
-                    }
-                    if (_ota != NULL)
-                    {
-                        _ota->committedFloor = floor;
-                    }
+                    return;
                 }
                 result = nivaloResult(NIVALO_ACK_SUCCEEDED);
             }
@@ -114,18 +198,23 @@ void NivaloExecutor::begin(const char *deviceId, const NivaloJournal *journal, c
         done.result = result;
         if (!persist(done))
         {
-            // The pending record stays: it is the evidence the next boot reconciles.
+            // Blocked. The pending record stays: it is the evidence the next boot reconciles.
             return;
         }
+        // Published by republishResult() after the next birth and with every heartbeat.
     }
-    if (_hasPending)
+    clearStalePending();
+}
+
+void NivaloExecutor::clearStalePending()
+{
+    // No claim is open (or its terminal result is durable), so no pending record is evidence of
+    // anything: a stale, damaged or unreadable one is cleared. A failed clear is retried at the
+    // next boot.
+    if (_hasPending && _platform.clearPending())
     {
-        // A pending record that does not belong to a claimed OTA record is just cleared. A failed
-        // clear is retried at the next boot; the record no longer matches any claim.
-        if (_platform.clearPending())
-        {
-            _hasPending = false;
-        }
+        _hasPending = false;
+        _pendingRead = NIVALO_STORE_MISSING;
     }
 }
 
@@ -299,15 +388,24 @@ void NivaloExecutor::execute(const NivaloOperation &operation)
         (void)finish(refreshResult(_platform.refreshCatalog()));
         return;
     }
-    // The handler and its arguments were prepared before the claim; the fresh reading below is
-    // the last step before the handler call.
+    // The handler and its arguments were prepared before the claim. Arming (the completion
+    // mailbox for this token, the handler and its argument view) also precedes the fresh reading
+    // below, so the handler call is the next step after it.
+    if (!_platform.armPrepared(_token))
+    {
+        // The claim is durable already; nothing ran, so this is a known zero-effect failure.
+        _platform.releasePrepared();
+        (void)finish(functionResult(NIVALO_FUNCTION_FAILED));
+        return;
+    }
     if (!recheck(&rejected, &rejectedDeferred))
     {
+        _platform.disarmPrepared();
         _platform.releasePrepared();
         (void)finish(rejected, rejectedDeferred);
         return;
     }
-    const NivaloFunctionOutcome outcome = _platform.invokePrepared(_token);
+    const NivaloFunctionOutcome outcome = _platform.invokePrepared();
     _platform.releasePrepared();
     if (outcome != NIVALO_FUNCTION_PENDING)
     {

@@ -129,6 +129,8 @@ add_library(nivalo_v11 STATIC
     ../../src/NivaloExecutor.cpp
     ../../src/NivaloCatalog.cpp
     ../../src/NivaloUplink.cpp
+    ../../src/NivaloCliProvisioningPolicy.cpp
+    ../../src/NivaloClaimResponse.cpp
 )
 target_include_directories(nivalo_v11 PUBLIC ../../src "${NIVALO_HOST_INCLUDE}")
 target_compile_features(nivalo_v11 PUBLIC cxx_std_11)
@@ -142,7 +144,7 @@ target_compile_definitions(nivalo_v11 PUBLIC
 target_link_libraries(nivalo_v11 PUBLIC nivalo_host_mbedtls)
 nivalo_warnings(nivalo_v11)
 
-foreach(name wire execution ota catalog uplink)
+foreach(name wire execution ota catalog uplink claim)
     add_executable(nivalo_v11_${name}_tests test_v11_${name}.cpp)
     target_link_libraries(nivalo_v11_${name}_tests PRIVATE nivalo_v11)
     target_compile_definitions(nivalo_v11_${name}_tests PRIVATE NIVALO_PROTOCOL_DIR="${NIVALO_PROTOCOL_DIR}")
@@ -150,8 +152,8 @@ foreach(name wire execution ota catalog uplink)
     add_test(NAME nivalo_v11_${name}_tests COMMAND nivalo_v11_${name}_tests)
 endforeach()
 
-# The durable protocol state (NivaloDeviceStore) against a map-backed stand-in for Preferences, so
-# identity changes and unreadable records are exercised on the real store code.
+# The durable protocol state (NivaloDeviceStore) against a map-backed stand-in for the native NVS
+# API, so identity changes and unreadable records are exercised on the real store code.
 add_executable(nivalo_v11_store_tests test_v11_store.cpp ../../src/NivaloDeviceStore.cpp)
 target_include_directories(nivalo_v11_store_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/fakes")
 target_link_libraries(nivalo_v11_store_tests PRIVATE nivalo_v11)
